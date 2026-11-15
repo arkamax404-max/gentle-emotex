@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExternalDisplayConfig } from "./types.ts";
-import { prepareDisplayImage } from "./display_image.ts";
+import { prepareDisplayImage, resolvePhaseLabel } from "./display_image.ts";
 import { IdleClock, IDLE_CLOCK_TICK_MS } from "./idle_clock.ts";
 import { prepareIdleClockImage } from "./idle_clock_image.ts";
 import { isWorkPhase } from "./work_phase.ts";
@@ -15,7 +15,7 @@ export interface DisplayActivity {
   /** The host's detailed ODD work phase, when Gentle Shell published one. Optional: omitted when absent. */
   workPhase?: "authorizing" | "exploring" | "researching" | "deciding" | "planning" | "implementing" | "checking" | "closing";
 }
-type Selection = SelectedImage & { activity: DisplayActivity; clockAt?: number };
+type Selection = SelectedImage & { activity: DisplayActivity; clockAt?: number; phaseElapsedSeconds?: number };
 const IDENTIFIER = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
 
 /** Invalid options disable networking, never local rendering. Credentials are not supported. */
@@ -113,6 +113,10 @@ export class ExternalDisplay {
   private selected: SelectedImage | null = null;
   private activity: DisplayActivity = { status: "idle", phase: "idle", activeSubagents: 0 };
   private lastKey = "";
+  // Phase-clock identity per destination: the resolved visible label and the
+  // monotonic moment it appeared. Null while IDLE, absent selection or pause.
+  private phaseLabel: string | null = null;
+  private phaseStartedAt: number | null = null;
   // Independent of terminal caches; at most 32 prepared avatar/clock images.
   private cache = new Map<string, Buffer>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -155,6 +159,9 @@ export class ExternalDisplay {
     this.paused = paused;
     this.lastKey = "";
     this.lastClockQueuedAt = null;
+    // Resume starts the phase clock fresh.
+    this.phaseLabel = null;
+    this.phaseStartedAt = null;
     if (paused) {
       this.pending = null;
       this.heartbeatPending = false;
@@ -208,13 +215,30 @@ export class ExternalDisplay {
         ? { base64: "", state: "clock", frame: "clock.png", set: "idle-clock" }
         : this.selected;
       if (!image) return;
-      const key = JSON.stringify([image.base64, image.state, image.frame, image.set, this.activity, clockAt]);
+      const phaseElapsedSeconds = ambient ? undefined : this.phaseElapsed(image, now);
+      const key = JSON.stringify([image.base64, image.state, image.frame, image.set, this.activity, clockAt, phaseElapsedSeconds]);
       if (key === this.lastKey) return;
       this.lastKey = key;
       if (ambient) this.lastClockQueuedAt = now;
-      this.pending = { ...image, activity: { ...this.activity }, ...(clockAt === undefined ? {} : { clockAt }) };
+      this.pending = { ...image, activity: { ...this.activity }, ...(clockAt === undefined ? {} : { clockAt }), ...(phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds }) };
       if (!this.active) void this.drain();
     } catch { this.warn("externalDisplay: selection failed"); }
+  }
+
+  /**
+   * Timer identity follows the visible phase label per destination: reset on
+   * every visible change, preserved across same-label frames and activity
+   * updates, never attached to visible IDLE, elapsed only past five seconds.
+   */
+  private phaseElapsed(image: SelectedImage, now: number): number | undefined {
+    const label = resolvePhaseLabel({ ...this.activity, state: image.state });
+    if (label !== this.phaseLabel) {
+      this.phaseLabel = label;
+      this.phaseStartedAt = label.toUpperCase() === "IDLE" ? null : now;
+    }
+    if (this.phaseStartedAt === null) return undefined;
+    const elapsed = now - this.phaseStartedAt;
+    return elapsed > 5000 ? Math.floor(elapsed / 1000) : undefined;
   }
 
   private async drain(): Promise<void> {
@@ -233,12 +257,12 @@ export class ExternalDisplay {
       if (image) {
         // Keep the same preparation and cache policy for legacy and session images.
         const cacheKey = image.clockAt === undefined
-          ? JSON.stringify([image.base64, image.state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase])
+          ? JSON.stringify([image.base64, image.state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds])
           : `idle-clock:${image.clockAt}`;
         body = this.cache.get(cacheKey);
         if (!body) {
           body = image.clockAt === undefined
-            ? prepareDisplayImage(image.base64, { ...image.activity, state: image.state }, this.options.background, this.options.backgroundCoverage, this.options.outline, this.options.transparentBackground)
+            ? prepareDisplayImage(image.base64, { ...image.activity, state: image.state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.options.outline, this.options.transparentBackground)
             : prepareIdleClockImage(image.clockAt, this.options.transparentBackground);
           if (this.cache.size >= 32) this.cache.delete(this.cache.keys().next().value!);
           this.cache.set(cacheKey, body);
@@ -286,5 +310,7 @@ export class ExternalDisplay {
     this.active?.abort();
     this.cache.clear();
     this.lastKey = "";
+    this.phaseLabel = null;
+    this.phaseStartedAt = null;
   }
 }
