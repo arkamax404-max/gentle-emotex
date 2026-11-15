@@ -14,8 +14,37 @@ const actionLabels = new Map<string, string>([
   ["judge", "judging"], ["review", "reviewing"],
 ]);
 
+/**
+ * Single visible-phase resolver shared by rendering and the per-destination
+ * phase timer: RUNNING (both coarse labels idle with active subagents) first,
+ * then the selected frame's registered demo name under any coarse/host phase.
+ * Without a registered selection, the host detail fallback applies only for
+ * thinking/executing; otherwise the coarse phase remains.
+ */
+export function resolvePhaseLabel(activity: Pick<DisplayActivity, "status" | "phase"> & Partial<Pick<DisplayActivity, "activeSubagents" | "workPhase"> & { state?: string }>): string {
+  if (activity.status === "idle" && activity.phase === "idle" && (activity.activeSubagents ?? 0) > 0) return "RUNNING";
+  const coarse = activity.phase;
+  const detailed = activity.state !== undefined && (EMOTE_STATES as readonly string[]).includes(activity.state)
+    ? activity.state
+    : isWorkPhase(activity.workPhase) && (coarse === "thinking" || coarse === "executing")
+      ? activity.workPhase
+      : coarse;
+  return actionLabels.get(detailed) ?? detailed;
+}
+
+/** MM:SS beside the visible phase label; IDLE and invalid/negative elapsed render untimed. */
+function timedPhaseLabel(label: string, phaseElapsedSeconds: number | undefined): string {
+  if (phaseElapsedSeconds === undefined || !Number.isFinite(phaseElapsedSeconds) || phaseElapsedSeconds < 0) return label;
+  if (label.toUpperCase() === "IDLE") return label;
+  const total = Math.floor(phaseElapsedSeconds);
+  const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  // The full row must fit the 16-character font limit: the clock grows past
+  // 99 minutes and the phase text shrinks with it; the separator is one cell.
+  return `${label.slice(0, 15 - clock.length)} ${clock}`;
+}
+
 /** Raw post-accent sprite, not the terminal border; opaque by default, optionally preserving RGBA. */
-export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActivity, "status" | "phase"> & Partial<Pick<DisplayActivity, "activeSubagents" | "workPhase"> & { state?: string }>, background = "#000000", backgroundCoverage = 1, outline?: string, transparentBackground = false): Buffer {
+export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActivity, "status" | "phase"> & Partial<Pick<DisplayActivity, "activeSubagents" | "workPhase"> & { state?: string; phaseElapsedSeconds?: number }>, background = "#000000", backgroundCoverage = 1, outline?: string, transparentBackground = false): Buffer {
   if (outline !== undefined && !/^#[0-9a-f]{6}$/i.test(outline)) throw new Error("invalid display outline");
   if (!Number.isFinite(backgroundCoverage) || backgroundCoverage < 0 || backgroundCoverage > 1) throw new Error("invalid background coverage");
   if (!/^#[0-9a-f]{6}$/i.test(background)) throw new Error("invalid display background");
@@ -57,18 +86,9 @@ export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActiv
     // on the display only, without changing the underlying activity.
     const running = activity.status === "idle" && activity.phase === "idle" && count > 0;
     const statusLabel = running ? "SUBAGENTS" : activity.status === "error" && activity.phase === "idle" ? "IDLE" : activity.status;
-    const label = `${statusLabel} (${count > 999 ? "999+" : count})`;
+    const label = count > 0 ? `${statusLabel} (${count > 999 ? "999+" : count})` : statusLabel;
     drawDisplayText(data, label, 44, index => index > statusLabel.length ? [255, 255, 0] : color);
-    // Use the selected frame's registered demo name under any coarse/host phase.
-    // Without a registered selection, retain the host detail fallback only for
-    // thinking/executing; RUNNING still takes precedence over every selected state.
-    const coarse = activity.phase;
-    const detailed = activity.state !== undefined && (EMOTE_STATES as readonly string[]).includes(activity.state)
-      ? activity.state
-      : isWorkPhase(activity.workPhase) && (coarse === "thinking" || coarse === "executing")
-        ? activity.workPhase
-        : coarse;
-    drawDisplayText(data, running ? "RUNNING" : (actionLabels.get(detailed) ?? detailed), 54, [224, 224, 224]);
+    drawDisplayText(data, timedPhaseLabel(resolvePhaseLabel(activity), activity.phaseElapsedSeconds), 54, [238, 238, 238]);
   }
   return encodePng({ width: 64, height: 64, data });
 }
