@@ -1,6 +1,6 @@
 /** One-pixel external silhouette outline; never outlines enclosed holes or labels. */
-export function drawDisplayOutline(data: Uint8Array, occupied: Uint8Array, color: readonly number[]): void {
-  const width = 64, height = 41; // Avatar viewport plus one bottom outline row.
+export function drawDisplayOutline(data: Uint8Array, occupied: Uint8Array, color: readonly number[], height = 41, top = 0): void {
+  const width = 64; // Avatar viewport plus one bottom outline row (region-relative via top/height).
   const exterior = new Uint8Array(width * height);
   const queue = new Uint16Array(width * height);
   let head = 0, tail = 0;
@@ -25,6 +25,6 @@ export function drawDisplayOutline(data: Uint8Array, occupied: Uint8Array, color
       const nx = x + dx, ny = y + dy;
       if (nx >= 0 && nx < width && ny >= 0 && ny < height && occupied[ny * width + nx]) adjacent = true;
     }
-    if (adjacent) data.set([color[0]!, color[1]!, color[2]!, 255], index * 4);
+    if (adjacent) data.set([color[0]!, color[1]!, color[2]!, 255], ((top + y) * 64 + x) * 4);
   }
 }

@@ -28,6 +28,8 @@ export function createD200Display(options: {
   fetcher?: typeof fetch;
   report?: (message: string) => void;
   sessionId?: string | null;
+  /** Sending project's working-directory basename: labels the captioned PNG layout. */
+  projectName?: string | null;
 } = {}): ExternalDisplay {
   const url = d200Url(options.port ?? resolveD200Port());
   return new ExternalDisplay(
@@ -35,5 +37,6 @@ export function createD200Display(options: {
     options.fetcher ?? fetch,
     options.report ?? (() => {}),
     options.sessionId ?? null,
+    options.projectName ?? null,
   );
 }

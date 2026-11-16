@@ -33,6 +33,50 @@ test("session identity is stable per destination and invalid IDs retain legacy d
   }
 });
 
+test("project name rides local image requests only as percent-encoded metadata", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const sender = new ExternalDisplays({ ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
+    async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); }, () => {}, "session-A", "mi repo ñ");
+  try {
+    sender.select(frame()); await tick();
+    assert.equal(calls.length, 2);
+    const local = calls.find(call => call.url === options.url)!;
+    const remote = calls.find(call => call.url === "http://matrix/emote")!;
+    assert.equal(new Headers(local.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"));
+    assert.equal(new Headers(remote.init.headers).get("X-Emote-Project-Name"), null, "LAN targets stay anonymous");
+    sender.updateActivity({ status: "busy", phase: "executing", activeSubagents: 0 });
+    await tick();
+    assert.equal(calls.length, 4, "activity changes resend local and remote images");
+    t.mock.timers.tick(5000); await tick();
+    assert.equal(calls.length, 6, "each destination answers with one heartbeat");
+    assert.ok(calls.slice(-2).every(call => call.init.body === undefined && new Headers(call.init.headers).get("X-Emote-Project-Name") === null), "heartbeats carry no project metadata");
+  } finally { sender.dispose(); }
+});
+
+test("invalid project names are omitted safely and delivery continues", async () => {
+  for (const name of ["", "   ", "x".repeat(129), 42, "\ud800", "mi repo \ud800", "/", "\\", "a/b", "a\\b", ".", "..", "a\u0000b", "bad\u007f"]) {
+    const calls: RequestInit[] = [];
+    const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A", name as any);
+    try {
+      sender.select(frame()); await tick();
+      assert.equal(calls.length, 1, `delivery continues for ${JSON.stringify(name)}`);
+      assert.equal(new Headers(calls[0]!.headers).get("X-Emote-Project-Name"), null, `metadata omitted for ${JSON.stringify(name)}`);
+    } finally { sender.dispose(); }
+  }
+});
+
+test("valid project names with spaces, unicode and dots survive validation", async () => {
+  for (const name of ["gentle-emotex", "mi repo ñ", "v1.2", "日本語", "a b (x)"]) {
+    const calls: RequestInit[] = [];
+    const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A", name);
+    try {
+      sender.select(frame()); await tick();
+      assert.equal(new Headers(calls[0]!.headers).get("X-Emote-Project-Name"), encodeURIComponent(name), `metadata kept for ${JSON.stringify(name)}`);
+    } finally { sender.dispose(); }
+  }
+});
+
 test("session heartbeats run every five seconds independently of image dedup", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -541,14 +585,14 @@ test("failures never escape; timeout aborts; disposal aborts and drops pending",
   }
 });
 
-test("idle-error delivery displays red IDLE but preserves error headers and ordinary busy/non-idle error labels", async () => {
+test("idle-error delivery with active subagents displays RUNNING but preserves error headers and ordinary busy/non-idle error labels", async () => {
   const calls: RequestInit[] = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
   try {
     sender.select(frame()); await tick();
     const original = decodePng(Buffer.from(calls[0]!.body as Uint8Array));
     for (const [status, phase, label, color] of [
-      ["error", "idle", "IDLE", [255, 96, 96]],
+      ["error", "idle", "SUBAGENTS", [255, 96, 96]],
       ["busy", "idle", "BUSY", [255, 208, 96]],
       ["error", "executing", "ERROR", [255, 96, 96]],
     ] as const) {
@@ -570,7 +614,12 @@ test("idle-error delivery displays red IDLE but preserves error headers and ordi
       drawDisplayText(expected, `${label} (2)`, 44, index => index > label.length ? [255, 255, 0] : color);
       assert.deepEqual(image.data.slice(44 * 64 * 4, 49 * 64 * 4), expected.slice(44 * 64 * 4, 49 * 64 * 4));
       assert.deepEqual(image.data.slice(0, 44 * 64 * 4), original.data.slice(0, 44 * 64 * 4), "sprite stays unchanged");
-      assert.deepEqual(image.data.slice(49 * 64 * 4), original.data.slice(49 * 64 * 4), "selected idle phase row stays unchanged");
+      if (status === "error" && phase === "idle") {
+        drawDisplayText(expected, "RUNNING", 54, [238, 238, 238]);
+        assert.deepEqual(image.data.slice(49 * 64 * 4), expected.slice(49 * 64 * 4), "active subagents override the selected idle phase");
+      } else {
+        assert.deepEqual(image.data.slice(49 * 64 * 4), original.data.slice(49 * 64 * 4), "selected idle phase row stays unchanged");
+      }
       assert.deepEqual(activity, snapshot, "sender does not mutate caller activity");
     }
   } finally { sender.dispose(); }
@@ -639,5 +688,103 @@ test("the selected state recomposes the PNG label and the cache keys it without 
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "build");
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Phase"), "executing");
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Work-Phase"), null);
+  } finally { sender.dispose(); }
+});
+
+test("local and LAN PNGs gain the captioned layout while headers stay metadata-only", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const sender = new ExternalDisplays({ ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
+    async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); }, () => {}, "session-A", "mi repo ñ");
+  try {
+    sender.select(frame()); await tick();
+    assert.equal(calls.length, 2);
+    const localImage = decodePng(Buffer.from(calls[0]!.init.body as Uint8Array));
+    const remoteImage = decodePng(Buffer.from(calls[1]!.init.body as Uint8Array));
+    const localExpected = new Uint8Array(64 * 64 * 4);
+    const remoteExpected = new Uint8Array(64 * 64 * 4);
+    for (let i = 3; i < localExpected.length; i += 4) { localExpected[i] = 255; remoteExpected[i] = 255; }
+    drawDisplayText(localExpected, "MI REPO N", 1, [128, 224, 160]);
+    drawDisplayText(remoteExpected, "MI REPO N", 1, [0, 255, 0]);
+    drawDisplayText(localExpected, "idle", 51, [128, 224, 160]);
+    drawDisplayText(remoteExpected, "idle", 51, [128, 224, 160]);
+    assert.deepEqual(localImage.data.slice(0, 10 * 64 * 4), localExpected.slice(0, 10 * 64 * 4), "local caption keeps the muted status-palette green");
+    assert.deepEqual(localImage.data.slice(51 * 64 * 4, 56 * 64 * 4), localExpected.slice(51 * 64 * 4, 56 * 64 * 4), "local status row compacts to 51");
+    assert.deepEqual(remoteImage.data.slice(0, 10 * 64 * 4), remoteExpected.slice(0, 10 * 64 * 4), "LAN caption renders pure green on the LED display");
+    assert.deepEqual(remoteImage.data.slice(51 * 64 * 4, 56 * 64 * 4), remoteExpected.slice(51 * 64 * 4, 56 * 64 * 4), "LAN status row compacts to 51");
+    // A repeated render served from the per-instance cache must keep the same
+    // per-destination ink instead of leaking one color into the other.
+    sender.select({ ...frame(), frame: "cached.png" }); await tick();
+    assert.equal(calls.length, 4);
+    const cachedLocal = decodePng(Buffer.from(calls[2]!.init.body as Uint8Array));
+    const cachedRemote = decodePng(Buffer.from(calls[3]!.init.body as Uint8Array));
+    assert.deepEqual(cachedLocal.data.slice(1 * 64 * 4, 6 * 64 * 4), localExpected.slice(1 * 64 * 4, 6 * 64 * 4), "cached local renders keep the default ink");
+    assert.deepEqual(cachedRemote.data.slice(1 * 64 * 4, 6 * 64 * 4), remoteExpected.slice(1 * 64 * 4, 6 * 64 * 4), "cached LAN renders keep the pure green ink");
+    assert.equal(new Headers(calls[0]!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "the header stays percent-encoded metadata");
+    assert.equal(new Headers(calls[1]!.init.headers).get("X-Emote-Project-Name"), null, "the header never rides LAN traffic");
+  } finally { sender.dispose(); }
+});
+
+test("an invalid project name keeps the legacy layout on local destinations too", async () => {
+  const calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A", "a/b");
+  try {
+    sender.select(frame()); await tick();
+    const image = decodePng(Buffer.from(calls[0]!.body as Uint8Array));
+    for (let y = 4; y < 10; y++) for (let x = 0; x < 64; x++) {
+      assert.deepEqual([...image.data.slice((y * 64 + x) * 4, (y * 64 + x) * 4 + 4)], [0, 0, 0, 255], `no caption row ${y}`);
+    }
+    const expected = new Uint8Array(64 * 64 * 4);
+    for (let i = 3; i < expected.length; i += 4) expected[i] = 255;
+    drawDisplayText(expected, "idle", 44, [128, 224, 160]);
+    assert.deepEqual(image.data.slice(44 * 64 * 4, 49 * 64 * 4), expected.slice(44 * 64 * 4, 49 * 64 * 4), "legacy status row at 44");
+  } finally { sender.dispose(); }
+});
+
+test("setTitle re-captions the live selection without touching selection, stream or sequence", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const sender = new ExternalDisplays({ ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
+    async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); }, () => {}, "session-A", "mi repo ñ");
+  try {
+    sender.select(frame()); await tick();
+    assert.equal(calls.length, 2);
+    const first = calls.at(-1)!;
+    sender.setTitle("Título Nuevo");
+    await tick();
+    assert.equal(calls.length, 4, "both destinations resend the current frame with the new caption");
+    for (const [call, origin] of [[calls.at(-2)!, calls[0]!], [calls.at(-1)!, calls[1]!]] as const) {
+      const headers = new Headers(call.init.headers);
+      assert.equal(headers.get("X-Emote-State"), "idle", "the selection is preserved");
+      assert.equal(headers.get("X-Emote-Frame"), "idle.png");
+      assert.equal(headers.get("X-Emote-Stream-Id"), new Headers(origin.init.headers).get("X-Emote-Stream-Id"), "the stream identity is preserved per destination");
+      assert.notEqual(call.init.body, origin.init.body, "the captioned PNG bytes change");
+    }
+    assert.equal(new Headers(calls.at(-2)!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("Título Nuevo"), "local metadata follows the title");
+    assert.equal(new Headers(calls.at(-1)!.init.headers).get("X-Emote-Project-Name"), null, "LAN targets stay anonymous");
+
+    sender.setTitle(null);
+    await tick();
+    assert.equal(calls.length, 6, "reset resends the live caption on every destination");
+    assert.equal(new Headers(calls.at(-2)!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "reset restores the folder basename");
+
+    assert.equal(sender.setTitle("a/b"), 0, "an invalid title is rejected on every destination");
+    sender.updateActivity({ status: "busy", phase: "executing", activeSubagents: 0 });
+    await tick();
+    assert.equal(new Headers(calls.at(-2)!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "a rejected title leaves the caption untouched");
+  } finally { sender.dispose(); }
+});
+
+test("setTitle with the current value is a no-op and invalid titles never re-caption", async () => {
+  const calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A", "base");
+  try {
+    sender.select(frame()); await tick();
+    assert.equal(sender.setTitle("base"), true, "setting the already-effective basename changes nothing");
+    await tick();
+    assert.equal(calls.length, 1, "no resend for an unchanged caption");
+    for (const invalid of ["", "   ", "x".repeat(129)]) assert.equal(sender.setTitle(invalid), false, `invalid titles are rejected: ${JSON.stringify(invalid)}`);
+    await tick();
+    assert.equal(calls.length, 1);
+    sender.select(frame("next.png")); await tick();
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name"), encodeURIComponent("base"), "delivery keeps the basename caption");
   } finally { sender.dispose(); }
 });

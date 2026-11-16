@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExternalDisplayConfig } from "./types.ts";
+import { encodeProjectName, normalizeTitle } from "./title_state.ts";
 import { prepareDisplayImage, resolvePhaseLabel } from "./display_image.ts";
 import { IdleClock, IDLE_CLOCK_TICK_MS } from "./idle_clock.ts";
 import { prepareIdleClockImage } from "./idle_clock_image.ts";
@@ -46,12 +47,12 @@ export function isLoopbackDisplayUrl(url: string): boolean {
 export class ExternalDisplays {
   private displays: ExternalDisplay[] = [];
 
-  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null) {
+  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null) {
     if (!options || typeof options !== "object") return;
     const config = options as ExternalDisplayConfig;
     if (config.enabled !== true) return;
     if (config.targets === undefined) {
-      this.displays = [new ExternalDisplay(options, fetcher, report, sessionId)];
+      this.displays = [new ExternalDisplay(options, fetcher, report, sessionId, projectName)];
       return;
     }
     if (!Array.isArray(config.targets) || config.targets.length > 8) {
@@ -63,6 +64,7 @@ export class ExternalDisplays {
       fetcher,
       message => report(`destination ${index + 1}: ${message}`),
       sessionId,
+      projectName,
     ));
   }
 
@@ -92,6 +94,8 @@ export class ExternalDisplays {
 
   select(image: SelectedImage): void { for (const display of this.displays) display.select(image); }
   updateActivity(activity: DisplayActivity): void { for (const display of this.displays) display.updateActivity(activity); }
+  /** Live caption change on every destination; returns the count that accepted it. */
+  setTitle(value: string | null): number { let count = 0; for (const display of this.displays) if (display.setTitle(value)) count++; return count; }
   dispose(): void { for (const display of this.displays) display.dispose(); this.displays = []; }
 }
 
@@ -102,6 +106,15 @@ export class ExternalDisplay {
   private sequence = 0n;
   // Capture identity for this sender lifetime: queued frames cannot change sessions.
   private readonly sessionId: string | null;
+  // Capture the sending project's working-directory basename for every image
+  // destination: immutable per sender, never a full path. The raw basename
+  // labels the captioned PNG layout on all destinations; the percent-encoded
+  // metadata header stays local-only, never attached to LAN traffic.
+  private projectName: string | null;
+  private displayName: string | null;
+  // Captured folder basename: the fallback when a title override resets.
+  private readonly baseName: string | null;
+  private readonly baseEncoded: string | null;
   private heartbeatUrl: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatPending = false;
@@ -117,6 +130,10 @@ export class ExternalDisplay {
   // monotonic moment it appeared. Null while IDLE, absent selection or pause.
   private phaseLabel: string | null = null;
   private phaseStartedAt: number | null = null;
+  // Whether the current visible phase is exempt from the clock: visible IDLE or
+  // GRANDMA with no active subagents. Tracked separately so an eligibility
+  // transition resets the budget even when the label itself stays unchanged.
+  private phaseUntimed = false;
   // Independent of terminal caches; at most 32 prepared avatar/clock images.
   private cache = new Map<string, Buffer>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -127,10 +144,14 @@ export class ExternalDisplay {
   private fetcher: typeof fetch;
   private report: (message: string) => void;
 
-  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null) {
+  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null) {
     this.fetcher = fetcher;
     this.report = report;
     this.sessionId = typeof sessionId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(sessionId) ? sessionId : null;
+    this.projectName = encodeProjectName(projectName);
+    this.displayName = this.projectName === null ? null : projectName as string;
+    this.baseName = this.displayName;
+    this.baseEncoded = this.projectName;
     this.options = normalizeExternalDisplay(options);
     if (this.options) {
       this.clockTimer = setInterval(() => this.queueLatest(), IDLE_CLOCK_TICK_MS);
@@ -162,6 +183,7 @@ export class ExternalDisplay {
     // Resume starts the phase clock fresh.
     this.phaseLabel = null;
     this.phaseStartedAt = null;
+    this.phaseUntimed = false;
     if (paused) {
       this.pending = null;
       this.heartbeatPending = false;
@@ -202,6 +224,25 @@ export class ExternalDisplay {
     } catch { this.warn("externalDisplay: selection failed"); }
   }
 
+  /**
+   * Live caption change: re-captions the current selection without touching the
+   * selection, stream, sequence, timers or output states. `null` resets to the
+   * captured folder basename. Returns false when the title is invalid.
+   */
+  setTitle(value: string | null): boolean {
+    const next = normalizeTitle(value);
+    if (next === undefined) return false;
+    const raw = next === null ? this.baseName : next;
+    const encoded = next === null ? this.baseEncoded : encodeProjectName(next);
+    if (raw === this.displayName) return true;
+    this.displayName = raw;
+    this.projectName = encoded;
+    this.lastKey = "";
+    this.lastClockQueuedAt = null;
+    this.queueLatest();
+    return true;
+  }
+
   /** Overlay only the external delivery; retain the avatar for activity/resume. */
   private queueLatest(): void {
     if (!this.options || this.disposed || this.paused) return;
@@ -228,13 +269,18 @@ export class ExternalDisplay {
   /**
    * Timer identity follows the visible phase label per destination: reset on
    * every visible change, preserved across same-label frames and activity
-   * updates, never attached to visible IDLE, elapsed only past five seconds.
+   * updates, elapsed only past five seconds. Visible IDLE and GRANDMA stay
+   * untimed only while no subagent is running: with active workers they time
+   * like any other phase, the timer clears the moment the workers finish, and
+   * a later start on the same visible label begins a fresh budget.
    */
   private phaseElapsed(image: SelectedImage, now: number): number | undefined {
     const label = resolvePhaseLabel({ ...this.activity, state: image.state });
-    if (label !== this.phaseLabel) {
+    const untimed = ["IDLE", "GRANDMA"].includes(label.toUpperCase()) && this.activity.activeSubagents === 0;
+    if (label !== this.phaseLabel || untimed !== this.phaseUntimed) {
       this.phaseLabel = label;
-      this.phaseStartedAt = label.toUpperCase() === "IDLE" ? null : now;
+      this.phaseUntimed = untimed;
+      this.phaseStartedAt = untimed ? null : now;
     }
     if (this.phaseStartedAt === null) return undefined;
     const elapsed = now - this.phaseStartedAt;
@@ -256,13 +302,15 @@ export class ExternalDisplay {
       if (this.sessionId) headers["X-Emote-Session-Id"] = this.sessionId;
       if (image) {
         // Keep the same preparation and cache policy for legacy and session images.
+        // The captioned layout is part of the cached bytes' identity per destination.
+        const layoutKey = this.displayName ? `project:${this.displayName}:` : "";
         const cacheKey = image.clockAt === undefined
-          ? JSON.stringify([image.base64, image.state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds])
+          ? `${layoutKey}${JSON.stringify([image.base64, image.state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds])}`
           : `idle-clock:${image.clockAt}`;
         body = this.cache.get(cacheKey);
         if (!body) {
           body = image.clockAt === undefined
-            ? prepareDisplayImage(image.base64, { ...image.activity, state: image.state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.options.outline, this.options.transparentBackground)
+            ? prepareDisplayImage(image.base64, { ...image.activity, state: image.state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.options.outline, this.options.transparentBackground, this.displayName, this.local ? undefined : [0, 255, 0])
             : prepareIdleClockImage(image.clockAt, this.options.transparentBackground);
           if (this.cache.size >= 32) this.cache.delete(this.cache.keys().next().value!);
           this.cache.set(cacheKey, body);
@@ -274,6 +322,7 @@ export class ExternalDisplay {
           "X-Emote-Active-Subagents": String(image.activity.activeSubagents),
           ...(image.activity.workPhase === undefined ? {} : { "X-Emote-Work-Phase": image.activity.workPhase }),
         });
+        if (this.local && this.projectName) headers["X-Emote-Project-Name"] = this.projectName;
       }
       const limit = this.sessionId ? 18446744073709551615n : 99999999999999999999n;
       if (this.sequence >= limit) throw new Error("sequence exhausted");
@@ -312,5 +361,6 @@ export class ExternalDisplay {
     this.lastKey = "";
     this.phaseLabel = null;
     this.phaseStartedAt = null;
+    this.phaseUntimed = false;
   }
 }

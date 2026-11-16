@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { OutputStateStore, OUTPUTS } from "../src/output_state.ts";
+import { decodePng } from "../src/png.ts";
 
 const PLACEHOLDER = "\u{10EEEE}";
 const SESSION_ID = "integration-session";
@@ -180,6 +181,31 @@ test("session wiring mirrors image selections and prompt overlays, shutdown stop
     const count = calls.length;
     await lab.emit("tool_execution_start", { toolName: "read" });
     assert.equal(calls.length, count);
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("external delivery carries the working-directory basename as project metadata", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-project-name-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" } }));
+  const originalFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root);
+    await lab.emit("tool_execution_start", { toolName: "bash" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(calls.length > 0);
+    const header = new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name");
+    assert.ok(header, "local deliveries name the sending project");
+    assert.equal(decodeURIComponent(header!), basename(root));
+    assert.ok(!header!.includes("/") && !header!.includes("\\"), "metadata is a basename, never the full path");
+    await lab.shutdown();
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });
@@ -479,6 +505,13 @@ test("/emote d200Off stops the D200 stream without touching config", async () =>
     assert.ok(calls.length > 0, "d200On mirrors frames");
     assert.ok(calls.every((call) => call.url === "http://127.0.0.1:8003/emote"));
     assert.equal(new Headers(calls.at(-1)!.init.headers).get("X-Emote-Version"), "1");
+    // The dedicated key shares the captioned layout wiring: runtime d200On passes
+    // the sending project's basename, so its loopback requests name the project.
+    for (const call of calls) {
+      const header = new Headers(call.init.headers).get("X-Emote-Project-Name");
+      assert.ok(header, "d200On names the sending project");
+      assert.equal(decodeURIComponent(header!), basename(root));
+    }
 
     const delivered = calls.length;
     await emote.handler("d200Off", lab.ctx);
@@ -802,6 +835,170 @@ test("the host work phase reaches the headers and PNG labels and clears at turn 
     await flush();
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Work-Phase"), "planning");
     assert.notDeepEqual(calls.at(-1)!.body, bodyWithDetail);
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/emote title persists a per-project caption, applies live, survives reload and isolates projects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-title-project-"));
+  const other = join(root, "other");
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  const otherDir = join(other, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(otherDir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" } }));
+  writeFileSync(join(otherDir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" } }));
+  const originalFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const caption = () => new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root);
+    const emote = lab.commands.get("emote");
+    const completions = emote.getArgumentCompletions("title");
+    assert.deepEqual(completions.map((item: any) => item.value), ["title"]);
+    assert.ok(completions[0].description, "the title completion carries a description");
+    assert.ok(emote.description.includes("title <text>"), "the command description names the subcommand");
+
+    await lab.emit("tool_execution_start", { toolName: "bash", toolCallId: "t" });
+    await flush();
+    assert.equal(caption(), encodeURIComponent(basename(root)), "the folder basename is the default caption");
+
+    await emote.handler("title  Mi Proyecto ñ ", lab.ctx);
+    await flush();
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "title.json"), "utf8")), { title: "Mi Proyecto ñ" }, "the trimmed title is saved per project");
+    assert.equal(caption(), encodeURIComponent("Mi Proyecto ñ"), "the live caption follows the command");
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "tool", "activity delivery is untouched");
+    assert.ok(!lab.notices.some(notice => notice.level === "error"));
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" });
+    await flush();
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "read", "existing state previews keep working");
+    assert.equal(caption(), encodeURIComponent("Mi Proyecto ñ"), "later frames keep the caption");
+
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    calls.length = 0;
+    lab = await boot(root);
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r2" });
+    await flush();
+    assert.equal(caption(), encodeURIComponent("Mi Proyecto ñ"), "reload restores the saved override");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    calls.length = 0;
+
+    lab = await boot(other);
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r3" });
+    await flush();
+    assert.equal(caption(), encodeURIComponent(basename(other)), "another project keeps the folder name");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    calls.length = 0;
+
+    lab = await boot(root);
+    await lab.emit("tool_execution_start", { toolName: "bash", toolCallId: "t2" });
+    await flush();
+    await lab.commands.get("emote").handler("title", lab.ctx);
+    await flush();
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "title.json"), "utf8")), { title: null }, "bare reset stores an explicit null");
+    assert.equal(caption(), encodeURIComponent(basename(root)), "bare /emote title restores the folder basename");
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "tool", "state delivery continues after reset");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an invalid title reports a warning and changes nothing; a failed save leaves caption and storage untouched", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-title-failure-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" } }));
+  mkdirSync(join(dir, "title.json"), { recursive: true });
+  const originalFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root);
+    const emote = lab.commands.get("emote");
+    await lab.emit("tool_execution_start", { toolName: "bash", toolCallId: "t" });
+    await flush();
+    const before = calls.length;
+    const caption = () => new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name");
+    assert.equal(caption(), encodeURIComponent(basename(root)));
+
+    await emote.handler("title a/b", lab.ctx);
+    assert.deepEqual(lab.notices.at(-1), {
+      message: "[gentle-emote] invalid title; the display title is unchanged", level: "warning",
+    });
+    await emote.handler("title  Nuevo ", lab.ctx);
+    await flush();
+    assert.deepEqual(lab.notices.at(-1), {
+      message: "[gentle-emote] cannot save project title; title unchanged", level: "error",
+    }, "the failed save is reported");
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" });
+    await flush();
+    assert.ok(calls.length > before, "delivery keeps flowing after failures");
+    assert.equal(caption(), encodeURIComponent(basename(root)), "the live caption stays on the folder name");
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "read");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed stored title override warns, falls back to the folder name and preserves the file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-title-badfile-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" } }));
+  writeFileSync(join(dir, "title.json"), "{broken");
+  const originalFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root);
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" });
+    await flush();
+    assert.ok(calls.length > 0);
+    assert.ok(lab.notices.some(notice =>
+      notice.level === "warning" && notice.message === "[gentle-emote] cannot read saved title override; using the project folder name"));
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name"), encodeURIComponent(basename(root)), "the folder name is used");
+    assert.equal(readFileSync(join(dir, "title.json"), "utf8"), "{broken", "the malformed file is preserved");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime d200On mirrors frames with the effective project title", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-title-d200-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: false, url: "http://127.0.0.1:8000/emote" } }));
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root);
+    const emote = lab.commands.get("emote");
+    await emote.handler("title  D200 Título ", lab.ctx);
+    await flush();
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "title.json"), "utf8")), { title: "D200 Título" });
+    await emote.handler("d200On", lab.ctx);
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" });
+    await flush();
+    const mirror = calls.filter(call => call.url === "http://127.0.0.1:8003/emote");
+    assert.ok(mirror.length > 0, "d200On delivers frames");
+    for (const call of mirror) {
+      assert.equal(new Headers(call.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("D200 Título"), "the runtime mirror uses the saved title");
+    }
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });

@@ -41,10 +41,18 @@ const GLYPHS: Record<string, string[]> = {
   X: ["101", "101", "010", "101", "101"],
   Y: ["101", "101", "010", "010", "010"],
   Z: ["111", "001", "010", "100", "111"],
+  ".": ["000", "000", "000", "000", "010"],
+  "_": ["000", "000", "000", "000", "111"],
 };
 
+/** Accented filenames read better folded: ñ → N, é → E, via Unicode decomposition. */
+function foldAccents(text: string): string {
+  try { return text.normalize("NFD").replace(/\p{M}/gu, ""); }
+  catch { return text; }
+}
+
 export function drawDisplayText(data: Uint8Array, text: string, top: number, color: readonly number[] | ((index: number) => readonly number[])): void {
-  const label = text.toUpperCase().slice(0, 16);
+  const label = foldAccents(text).toUpperCase().slice(0, 16);
   const left = Math.floor((64 - (label.length * 4 - 1)) / 2);
   for (let i = 0; i < label.length; i++) {
     const glyph = GLYPHS[label[i]!];

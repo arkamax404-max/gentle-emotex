@@ -152,7 +152,7 @@ test("S4: clock PNG uses DD/MM/YYYY, 24-hour digits and 2x seconds, including mi
   } finally { sender.dispose(); }
 });
 
-test("busy/error, active subagents, detailed work and explicit previews reset the deadline; grandma remains eligible", async t => {
+test("busy/error, active subagents, detailed work and explicit previews reset the deadline; idle restarts after each", async t => {
   const clock = virtualTime(t);
   for (const blocked of [
     { activity: { ...idle, status: "error" as const } },
@@ -168,12 +168,53 @@ test("busy/error, active subagents, detailed work and explicit previews reset th
       sender.updateActivity(blocked.activity); sender.select(frame("preview.png", blocked.state ?? "idle")); await flush();
       await clock.advance(301000);
       assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"));
-      sender.updateActivity(idle); sender.select(frame("grandma.png", "grandma")); await flush();
+      sender.updateActivity(idle); sender.select(frame("idle.png", "idle")); await flush();
       await clock.advance(300000);
       assert.notEqual(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
       await clock.advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
     } finally { sender.dispose(); }
   }
+});
+
+test("grandma triggers the idle clock like plain idle: no clock exactly five minutes, clock past it, continuous idle budget across idle->grandma, and activity still resets the deadline", async t => {
+  const clock = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+  try {
+    sender.select(frame("grandma.png", "grandma")); await flush();
+    await clock.advance(300000);
+    assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), "exactly five minutes of grandma is not enough");
+    await clock.advance(1000);
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "prolonged grandma emits the clock past five minutes");
+    sender.select(frame("grandma2.png", "grandma")); await flush();
+    await clock.advance(1000);
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "grandma does not stop the active clock");
+
+    sender.updateActivity({ status: "busy", phase: "thinking", activeSubagents: 0 }); await flush();
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "grandma", "activity returns the grandma avatar immediately");
+    const after = calls.length;
+    const clockCalls = () => calls.slice(after).filter(call => headers(call).get("X-Emote-State") === "clock");
+    await clock.advance(600000);
+    assert.equal(clockCalls().length, 0, "busy activity stops the clock as before");
+    sender.updateActivity(idle); await flush();
+    await clock.advance(300000);
+    assert.equal(clockCalls().length, 0, "idle after activity restarts the full fresh delay");
+    await clock.advance(1000);
+    assert.equal(clockCalls().length, 1, "idle after activity fires the clock again past five minutes");
+  } finally { sender.dispose(); }
+
+  const idleCalls: RequestInit[] = [];
+  const idleFirst = new ExternalDisplay(options, async (_url, init) => { idleCalls.push(init!); return new Response(); });
+  try {
+    idleFirst.select(frame("idle.png", "idle")); await flush();
+    await clock.advance(200000);
+    idleFirst.select(frame("grandma.png", "grandma")); await flush();
+    assert.equal(headers(idleCalls.at(-1)!).get("X-Emote-State"), "grandma", "grandma shows before the deadline");
+    assert.deepEqual(Buffer.from(idleCalls.at(-1)!.body as Uint8Array), prepareDisplayImage(base64, { ...idle, state: "grandma" }), "grandma carries no MM:SS phase counter");
+    await clock.advance(100000);
+    assert.ok(idleCalls.every(call => headers(call).get("X-Emote-State") !== "clock"), "exactly five shared idle minutes is not enough");
+    await clock.advance(1000);
+    assert.equal(headers(idleCalls.at(-1)!).get("X-Emote-State"), "clock", "the idle budget accumulated before grandma fires the clock");
+  } finally { idleFirst.dispose(); }
 });
 
 test("S5: clock reaches enabled simulator, LED and D200 independently without bypassing output pause or disabled config", async t => {

@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readdirSync, unwatchFile, watchFile } from "node:fs";
 
@@ -29,6 +29,7 @@ import { SubagentTaskTracker } from "./subagent_activity.ts";
 import { ODD_PHASE_CHANGE_EVENT, ODD_PHASE_CURRENT_EVENT, WORK_PHASES, WorkPhaseTracker, isWorkPhase } from "./work_phase.ts";
 import type { WorkPhase } from "./work_phase.ts";
 import { OutputStateStore, OUTPUTS } from "./output_state.ts";
+import { TitleStore, normalizeTitle } from "./title_state.ts";
 
 const WIDGET_KEY = "gentle-emote";
 const BANNER_POLL_MS = 2000;
@@ -98,6 +99,7 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   checking: "fills a checklist with green checks (host ODD phase)",
   closing: "presents the completed-work folder (host ODD phase)",
   demo: "plays the original scenes and all eight ODD work phases in a row",
+  title: "set the display title above the avatar for this project (/emote title <text>; bare restores the folder name)",
   internalOn: "show the terminal avatar (external delivery stays active)",
   internalOff: "hide the terminal avatar (external delivery stays active)",
   status: "show the last selected PNG, work phase source and activity snapshot (read-only diagnostic)",
@@ -218,6 +220,15 @@ export default function (pi: ExtensionAPI) {
   let currentEmoteSet = "gentleman";
   let widgetActive = false;
   const outputState = new OutputStateStore();
+  /** Per-project display title override; null shows the project folder basename. */
+  let projectTitle: string | null = null;
+
+  /** Apply the saved override on top of destinations built with the folder basename. */
+  function applyProjectTitle(): void {
+    if (projectTitle === null) return;
+    externalDisplay?.setTitle(projectTitle);
+    d200Display?.setTitle(projectTitle);
+  }
   let internalVisible = false;
   let lastResolved = resolveRenderer(config.terminals, userConfiguredTerminals);
   let renderer: Renderer = new PngSelectionRenderer();
@@ -270,7 +281,9 @@ export default function (pi: ExtensionAPI) {
         fetcher: fetch,
         report: (message) => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),
         sessionId: sessionId(),
+        projectName: typeof cwd === "string" ? basename(cwd) : "",
       });
+      if (projectTitle !== null) d200Display.setTitle(projectTitle);
       d200Display.updateActivity(displayActivity.snapshot());
       renderer.setFrameSink?.(frameSink());
       refreshCurrentFrame();
@@ -551,9 +564,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent)",
+    description: "Gentle-emote: /emote <state> | demo | status | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent)",
     getArgumentCompletions: (prefix: string) =>
-      [...EMOTE_STATES, "demo", "status", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])]
+      [...EMOTE_STATES, "demo", "status", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])]
         .filter((name) => name.startsWith(prefix.trim()))
         .map((name) => ({ value: name, label: name, description: EMOTE_DESCRIPTIONS[name] })),
     handler: async (args: string, ctx: any) => {
@@ -597,6 +610,26 @@ export default function (pi: ExtensionAPI) {
         showEmoteStatus(ctx);
         return;
       }
+      if (name === "title" || name.startsWith("title ")) {
+        // Bare `/emote title` resets to the project folder basename; any other
+        // text is trimmed and validated with the sender's project-name rules.
+        const text = name.slice("title".length).trim();
+        const next = text === "" ? null : normalizeTitle(text);
+        if (text !== "" && next === undefined) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] invalid title; the display title is unchanged`, "warning");
+          return;
+        }
+        try { new TitleStore(cwd).save(next); }
+        catch {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save project title; title unchanged`, "error");
+          return;
+        }
+        projectTitle = next;
+        externalDisplay?.setTitle(next);
+        d200Display?.setTitle(next);
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] display title ${next === null ? "restored to the project folder name" : `set to "${next}"`}`, "info");
+        return;
+      }
       if (name === "demo") {
         playDemo();
         return;
@@ -605,7 +638,7 @@ export default function (pi: ExtensionAPI) {
         previewState(name as EmoteState);
         return;
       }
-      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
     },
   });
 
@@ -628,16 +661,23 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled) return;
 
     const report = (message: string) => ctx.ui.notify(`[${EXTENSION_NAME}] ${message}`, "warning");
+    // The saved per-project override wins over the folder basename; a malformed
+    // file warns and falls back to the folder name, preserving the file.
+    projectTitle = typeof cwd === "string" ? new TitleStore(cwd).load(report) : null;
+    // Metadata only: the project folder's basename, never the full path. The
+    // saved title override (if any) is layered on top of every destination.
+    const projectName = typeof cwd === "string" ? basename(cwd) : "";
     const states = outputState.load(report);
     internalVisible = states.internal;
     externalDisplay?.dispose();
     // Never create shared-display senders in a child, even with saved On states.
     // Animation and output commands cannot bypass this ownership restriction.
-    externalDisplay = ownsSharedDisplays ? new ExternalDisplays(config.externalDisplay, fetch, report, sessionId()) : null;
+    externalDisplay = ownsSharedDisplays ? new ExternalDisplays(config.externalDisplay, fetch, report, sessionId(), projectName) : null;
     externalDisplay?.setDebugEnabled(states.debug);
     externalDisplay?.setDisplayEnabled(states.display);
     d200Display?.dispose();
-    d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId() }) : null;
+    d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
+    applyProjectTitle();
     displayActivity.reset();
     directWorkPhase = null;
     attachWorkPhase();

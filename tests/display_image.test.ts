@@ -8,7 +8,7 @@ import { EMOTE_STATES } from "../src/types.ts";
 const pixel = (image: ReturnType<typeof decodePng>, x: number, y: number) => [...image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 4)];
 const statusRow = (image: ReturnType<typeof decodePng>) => image.data.slice(44 * 64 * 4, 49 * 64 * 4);
 const phaseRow = (image: ReturnType<typeof decodePng>) => image.data.slice(54 * 64 * 4, 59 * 64 * 4);
-const referenceRow = (top: 44 | 54, text: string, color: readonly number[] | ((index: number) => readonly number[])) => {
+const referenceRow = (top: number, text: string, color: readonly number[] | ((index: number) => readonly number[])) => {
   const data = new Uint8Array(64 * 64 * 4);
   for (let i = 3; i < data.length; i += 4) data[i] = 255;
   drawDisplayText(data, text, top, color);
@@ -126,10 +126,11 @@ test("idle errors display red IDLE while non-idle errors retain ERROR without ch
       const activity = { status: "error", phase, activeSubagents } as const;
       const snapshot = { ...activity };
       const image = decodePng(prepareDisplayImage(base64, activity));
-      const label = phase === "idle" ? "IDLE" : "ERROR";
+      const running = phase === "idle" && activeSubagents > 0;
+      const label = running ? "SUBAGENTS" : phase === "idle" ? "IDLE" : "ERROR";
       const count = activeSubagents > 999 ? "999+" : String(activeSubagents);
       assert.deepEqual(statusRow(image), referenceRow(44, activeSubagents > 0 ? `${label} (${count})` : label, index => index > label.length ? [255, 255, 0] : [255, 96, 96]), `${phase}/${activeSubagents}`);
-      assert.deepEqual(phaseRow(image), referenceRow(54, phase, [238, 238, 238]), "the unselected phase row is unchanged");
+      assert.deepEqual(phaseRow(image), referenceRow(54, running ? "RUNNING" : phase, [238, 238, 238]), "the unselected phase row is unchanged");
       assert.deepEqual(image.data.slice(0, 44 * 64 * 4), plain.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");
       assert.deepEqual(image.data.slice(59 * 64 * 4), plain.data.slice(59 * 64 * 4), "bottom padding is unchanged");
       assert.deepEqual(activity, snapshot, "display copy never mutates activity");
@@ -140,8 +141,8 @@ test("idle errors display red IDLE while non-idle errors retain ERROR without ch
 test("agent count and parentheses are yellow while status retains its color", () => {
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) }).toString("base64");
   for (const [status, color] of [["idle", [128, 224, 160]], ["busy", [255, 208, 96]], ["error", [255, 96, 96]]] as const) {
-    // Both-idle subagents show SUBAGENTS; an idle error shows IDLE in red.
-    const displayed = status === "idle" ? "SUBAGENTS" : status === "error" ? "IDLE" : status;
+    // Both-idle subagents show SUBAGENTS for idle and error; only busy keeps its own label.
+    const displayed = status === "busy" ? "busy" : "SUBAGENTS";
     const image = decodePng(prepareDisplayImage(base64, { status, phase: "idle", activeSubagents: 2 }));
     const left = Math.floor((64 - ((displayed.length + 4) * 4 - 1)) / 2);
     let yellow = 0;
@@ -223,6 +224,51 @@ test("the SUBAGENTS override applies only when both status and phase are idle wi
   const phaseOnly = render({ status: "busy", phase: "idle", activeSubagents: 3 });
   assert.deepEqual(statusRow(phaseOnly), busyCount("3"));
   assert.deepEqual(phaseRow(phaseOnly), referenceRow(54, "idle", [238, 238, 238]));
+});
+
+test("error at idle with running subagents shows red SUBAGENTS with a yellow count and a timed RUNNING phase clock", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
+  const plain = decodePng(prepareDisplayImage(base64));
+  // Exact user-reported state: the parent errored, went idle, and a worker is still running.
+  const image = decodePng(prepareDisplayImage(base64, {
+    status: "error", phase: "idle", activeSubagents: 1, state: "delegate", phaseElapsedSeconds: 38,
+  }));
+  assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENTS (1)", index => index > "SUBAGENTS".length ? [255, 255, 0] : [255, 96, 96]), "the status row spells SUBAGENTS in the error red ink with the count yellow");
+  const clockStart = "RUNNING 00:38".lastIndexOf(" ") + 1;
+  assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING 00:38", index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]), "the phase clock follows the RUNNING label instead of the selected emote");
+  assert.deepEqual(image.data.slice(0, 44 * 64 * 4), plain.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");
+  assert.deepEqual(image.data.slice(59 * 64 * 4), plain.data.slice(59 * 64 * 4), "bottom padding is unchanged");
+});
+
+test("explicit elapsed times render on IDLE and GRANDMA only while subagents are active", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
+  for (const [state, label] of [["idle", "IDLE"], ["grandma", "GRANDMA"]] as const) {
+    const timed = decodePng(prepareDisplayImage(base64, {
+      status: "busy", phase: "thinking", activeSubagents: 1, state, phaseElapsedSeconds: 38,
+    }));
+    const clockStart = `${label} 00:38`.lastIndexOf(" ") + 1;
+    assert.deepEqual(phaseRow(timed), referenceRow(54, `${label} 00:38`, index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]), `${label} times with active subagents`);
+    const untimed = decodePng(prepareDisplayImage(base64, {
+      status: "busy", phase: "thinking", activeSubagents: 0, state, phaseElapsedSeconds: 38,
+    }));
+    assert.deepEqual(phaseRow(untimed), referenceRow(54, label, [238, 238, 238]), `${label} stays untimed without subagents`);
+  }
+});
+
+test("error at idle with subagents keeps error red and RUNNING under a selected frame, while count zero stays IDLE", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) }).toString("base64");
+  // A selected frame and contradictory host detail never override RUNNING.
+  for (const state of EMOTE_STATES) {
+    const image = decodePng(prepareDisplayImage(base64, {
+      status: "error", phase: "idle", activeSubagents: 2, state, workPhase: "planning",
+    }));
+    assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENTS (2)", index => index > "SUBAGENTS".length ? [255, 255, 0] : [255, 96, 96]), state);
+    assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING", [238, 238, 238]), state);
+  }
+  // No-count error-idle keeps the plain red IDLE behavior.
+  const idle = decodePng(prepareDisplayImage(base64, { status: "error", phase: "idle" }));
+  assert.deepEqual(statusRow(idle), referenceRow(44, "IDLE", [255, 96, 96]));
+  assert.deepEqual(phaseRow(idle), referenceRow(54, "idle", [238, 238, 238]));
 });
 
 test("custom background composites transparency but preserves opaque black artwork", () => {
@@ -426,4 +472,93 @@ test("super-yolo retains its literal three-pixel hyphen in the phase row", () =>
   for (let y = 54; y < 59; y++) for (let x = 32; x < 35; x++) {
     assert.deepEqual(pixel(image, x, y), y === 56 ? [238, 238, 238, 255] : [0, 0, 0, 255]);
   }
+});
+
+const projectNameInk = [128, 224, 160] as const;
+const clearRow = (image: ReturnType<typeof decodePng>, y: number, message: string) => {
+  for (let x = 0; x < 64; x++) assert.deepEqual(pixel(image, x, y), [0, 0, 0, 255], `${message} x=${x}`);
+};
+
+test("a project name compacts the local PNG into the approved captioned layout", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]) }).toString("base64");
+  const activity = { status: "busy", phase: "executing" } as const;
+  const image = decodePng(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, "my_repo"));
+
+  // Caption rows 1..5 leave exactly one blank row above; the whole avatar region
+  // rides one pixel higher inside rows 9..48.
+  assert.deepEqual(image.data.slice(1 * 64 * 4, 6 * 64 * 4), referenceRow(1, "MY_REPO", projectNameInk), "caption spells MY_REPO");
+  for (let y = 6; y < 9; y++) clearRow(image, y, "caption gap stays clear");
+  clearRow(image, 0, "top padding stays clear");
+
+  // The avatar centers inside rows 9..48: a 1x1 sprite lands at top 28.
+  assert.deepEqual(pixel(image, 31, 28), [255, 255, 255, 255]);
+  assert.deepEqual(pixel(image, 31, 29), [0, 0, 0, 255], "the sprite no longer sits at the old top 29 anchor");
+  clearRow(image, 9, "avatar region top padding");
+  clearRow(image, 48, "avatar region bottom padding");
+  clearRow(image, 49, "one-row bottom gap stays clear");
+
+  // Row 50 stays a clear separator; status sits at 51..55 and phase at 58..62.
+  clearRow(image, 50, "status separator stays clear");
+  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "busy", [255, 208, 96]), "status row moves to 51");
+  clearRow(image, 56, "two-pixel line gap");
+  clearRow(image, 57, "two-pixel line gap");
+  assert.deepEqual(image.data.slice(58 * 64 * 4, 63 * 64 * 4), referenceRow(58, "EXECUTING", [238, 238, 238]), "phase row moves to 58");
+  clearRow(image, 63, "a single bottom pixel remains below the phase");
+});
+
+test("a caption ink override recolors only the title, leaving status and phase inks untouched", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]) }).toString("base64");
+  const activity = { status: "busy", phase: "executing" } as const;
+  const image = decodePng(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, "my_repo", [0, 255, 0]));
+  assert.deepEqual(image.data.slice(1 * 64 * 4, 6 * 64 * 4), referenceRow(1, "MY_REPO", [0, 255, 0]), "the override ink recolors the caption");
+  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "busy", [255, 208, 96]), "status keeps its own ink");
+  assert.deepEqual(image.data.slice(58 * 64 * 4, 63 * 64 * 4), referenceRow(58, "EXECUTING", [238, 238, 238]), "phase keeps its own ink");
+});
+
+test("the caption truncates at sixteen characters and legacy layout survives a missing or empty name", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([255, 0, 0, 255]) }).toString("base64");
+  const activity = { status: "busy", phase: "thinking" } as const;
+  const image = decodePng(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, "abcdefghijklmnopqrst"));
+  assert.deepEqual(image.data.slice(1 * 64 * 4, 6 * 64 * 4), referenceRow(1, "ABCDEFGHIJKLMNOP", projectNameInk), "only the first sixteen characters are drawn");
+  const legacy = prepareDisplayImage(base64, activity);
+  assert.deepEqual(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, ""), legacy, "an empty name keeps the legacy layout");
+  assert.deepEqual(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false), legacy, "an omitted name keeps the legacy layout");
+  assert.notDeepEqual(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, "repo"), legacy, "a present name changes the layout");
+});
+
+test("the outline is reserved inside the avatar region so both separators stay clear", () => {
+  const data = new Uint8Array(5 * 5 * 4);
+  for (let i = 3; i < data.length; i += 4) data[i] = 255;
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 5; x++) data.set([200, 80, 40, 255], (y * 5 + x) * 4);
+  const base64 = encodePng({ width: 5, height: 5, data }).toString("base64");
+  const image = decodePng(prepareDisplayImage(base64, undefined, "#000000", 1, "#ffffff", false, "repo"));
+  // A 5x5 sprite centers at left 29, top 26; its outline ring rows 25..31 stays inside rows 9..48.
+  assert.deepEqual(pixel(image, 30, 27), [200, 80, 40, 255], "artwork stays intact");
+  assert.deepEqual(pixel(image, 28, 25), [255, 255, 255, 255], "outline draws above the sprite");
+  assert.deepEqual(pixel(image, 34, 30), [255, 255, 255, 255], "outline draws beside the sprite");
+  assert.deepEqual(pixel(image, 28, 31), [255, 255, 255, 255], "outline draws below the sprite");
+  assert.deepEqual(pixel(image, 27, 25), [0, 0, 0, 255], "outline is only one pixel");
+  clearRow(image, 8, "caption gap stays clear of the outline");
+  clearRow(image, 9, "avatar region top stays clear of the outline");
+  clearRow(image, 50, "status separator stays clear of the outline");
+  clearRow(image, 63, "bottom row stays clear of the outline");
+  // The contour never overwrites the caption or the status ink.
+  const plain = decodePng(prepareDisplayImage(base64, undefined, "#000000", 1, undefined, false, "repo"));
+  assert.deepEqual(image.data.slice(1 * 64 * 4, 6 * 64 * 4), plain.data.slice(1 * 64 * 4, 6 * 64 * 4), "caption rows 1..5 are never overwritten by the outline");
+  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), plain.data.slice(51 * 64 * 4, 56 * 64 * 4), "status rows 51..55 are never overwritten by the outline");
+});
+
+test("a full-height captioned sprite rides the region up one pixel so both separators stay clear", () => {
+  const base64 = encodePng({ width: 48, height: 40, data: new Uint8Array(48 * 40 * 4).fill(255) }).toString("base64");
+  const image = decodePng(prepareDisplayImage(base64, undefined, "#000000", 1, "#ffffff", false, "repo"));
+  // The raised region starts at row 9 with no clamp: a 40-row sprite occupies rows 9..48.
+  assert.deepEqual(pixel(image, 31, 9), [255, 255, 255, 255], "the sprite top rides at row 9");
+  assert.deepEqual(pixel(image, 31, 10), [255, 255, 255, 255], "artwork continues below the raised top");
+  assert.deepEqual(pixel(image, 31, 48), [255, 255, 255, 255]);
+  // The outline follows the whole region: side ring at column 7, never row 8.
+  assert.deepEqual(pixel(image, 7, 30), [255, 255, 255, 255], "outline follows beside the full-height sprite");
+  assert.deepEqual(pixel(image, 7, 9), [255, 255, 255, 255], "outline follows up to the raised top row");
+  clearRow(image, 8, "caption gap stays clear of sprite and outline");
+  clearRow(image, 49, "one-row bottom gap stays clear");
+  clearRow(image, 50, "status separator stays clear");
 });
