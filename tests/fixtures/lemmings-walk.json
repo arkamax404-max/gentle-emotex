@@ -1,0 +1,19 @@
+{
+  "description": "Canonical Lemmings walk-cycle sprite, extracted 1:1 from the authoritative reference sheet (D:/Desarrollo/emote-display-firmware/.tools/lemmings-preview.png). The sheet is 576x576 with a uniform 12x integer magnification (verified: every 12x12 block is a single color), so the native sheet is 48x48 holding a 3x3 grid of 16x16 pose cells. Each frame below is trimmed to its bounding box and keeps its native offset (x, y) inside its 16x16 cell; every pose stands with feet on cell row 12. G = hair green, S = skin pink, B = tunic blue, '.' = transparent.",
+  "source": "lemmings-preview.png (576x576, 12x magnified, native 48x48, palette: hair [0,179,0], skin [240,208,208], tunic [64,64,224], background black)",
+  "blockSize": 12,
+  "nativeSheet": { "width": 48, "height": 48, "cell": 16, "grid": [3, 3] },
+  "palette": { "G": [0, 179, 0], "S": [240, 208, 208], "B": [64, 64, 224] },
+  "feetRowInCell": 12,
+  "frames": [
+    { "x": 6, "y": 4, "rows": ["GGGG", "GGS.", ".SSS", ".SB.", ".SB.", ".SB.", ".BB.", "SBB.", ".SS."] },
+    { "x": 6, "y": 3, "rows": [".G.G.", "GGG..", "GGS..", ".SSS.", ".SB..", "SBB..", "SBB.S", ".BB.S", "BB.S.", "SS..."] },
+    { "x": 5, "y": 4, "rows": [".G.G..", ".GGG..", "..GS..", "..SSS.", ".SSB..", ".SBB..", "SSBBB.", ".BBBB.", "SS..SS"] },
+    { "x": 5, "y": 4, "rows": ["..GG.", ".GGSG", ".GSSS", "..SB.", "..SB.", ".SBB.", "..BB.", "SBBBB", "S..SS"] },
+    { "x": 6, "y": 4, "rows": ["GGGG", "GGS.", "GSSS", ".SB.", ".BS.", ".SB.", ".BB.", "SBB.", ".SS."] },
+    { "x": 6, "y": 3, "rows": [".G.G.", "GGG..", "GGS..", ".SSS.", ".SB..", ".BS..", ".BS.S", ".BB.S", "BB.S.", "SS..."] },
+    { "x": 5, "y": 4, "rows": [".G.G..", ".GGG..", "..GS..", "..SSS.", "..BS..", "..BS..", "..BBS.", ".BBBB.", "SS..SS"] },
+    { "x": 5, "y": 4, "rows": ["..GG.", ".GGSG", ".GSSS", "..SB.", "..SB.", "..BS.", "..BB.", "SBBBB", "S..SS"] },
+    { "x": 5, "y": 3, "rows": [".GG.", "GGS.", "GSSS", ".SB.", ".BS.", ".BBS", ".BBS", ".BB.", "SB..", ".S.."] }
+  ]
+}
