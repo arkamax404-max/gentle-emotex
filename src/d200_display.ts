@@ -19,6 +19,20 @@ export function d200Url(port = resolveD200Port()): string {
 }
 
 /**
+ * `/emote d200On <port>` grammar: a bare decimal TCP port and nothing else, so the
+ * argument can never smuggle a scheme, host or path into the destination. The default
+ * stays `GENTLE_EMOTE_D200_PORT`/8003; an accepted port overrides it for that session.
+ */
+export function parseD200Port(input: string): { port: number | null; error: string | null } {
+  const value = input.trim();
+  if (!value) return { port: null, error: "missing D200 port" };
+  const invalid = { port: null, error: "invalid D200 port (1-65535)" };
+  if (!/^[0-9]+$/.test(value)) return invalid;
+  const port = Number(value);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? { port, error: null } : invalid;
+}
+
+/**
  * Independent destination for the D200 key, toggled at runtime by `/emote d200On` and
  * `/emote d200Off`. It is never part of the layered config, so enabling it cannot be
  * persisted by accident and disabling it never touches configured destinations.

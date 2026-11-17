@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { D200_PORT, createD200Display, d200Url, resolveD200Port } from "../src/d200_display.ts";
+import { D200_PORT, createD200Display, d200Url, parseD200Port, resolveD200Port } from "../src/d200_display.ts";
 import { decodePng, encodePng } from "../src/png.ts";
 import { drawDisplayText } from "../src/display_text.ts";
 
@@ -28,6 +28,18 @@ test("the D200 destination defaults to 127.0.0.1:8003", () => {
 test("the port can be overridden for tests and invalid values fall back", () => {
   assert.equal(resolveD200Port({ GENTLE_EMOTE_D200_PORT: "9000" }), 9000);
   for (const value of ["", "0", "abc", "70000", "-1"]) assert.equal(resolveD200Port({ GENTLE_EMOTE_D200_PORT: value }), 8003, value);
+});
+
+test("an explicit D200 port is a bare decimal port in 1..65535 and nothing else", () => {
+  assert.deepEqual(parseD200Port("8003"), { port: 8003, error: null });
+  assert.deepEqual(parseD200Port("  9100  "), { port: 9100, error: null });
+  assert.deepEqual(parseD200Port("1"), { port: 1, error: null });
+  assert.deepEqual(parseD200Port("65535"), { port: 65535, error: null });
+  // One bounded message per cause, like `/emote displayOn <address>`.
+  for (const empty of ["", "   ", "\t"]) assert.deepEqual(parseD200Port(empty), { port: null, error: "missing D200 port" }, JSON.stringify(empty));
+  for (const input of ["0", "65536", "-1", "+8003", "80.5", "1e3", "0x1f90", "abc", "8003abc", "http://127.0.0.1:9000/emote", "127.0.0.1:9000", "9000/emote"]) {
+    assert.deepEqual(parseD200Port(input), { port: null, error: "invalid D200 port (1-65535)" }, input);
+  }
 });
 
 test("a D200 display posts protocol v1 frames to the key receiver", async () => {

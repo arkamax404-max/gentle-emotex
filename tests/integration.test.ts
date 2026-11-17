@@ -1001,7 +1001,6 @@ test("the host work phase reaches the headers and PNG labels and clears at turn 
     assert.notEqual(bodyWithDetail, calls[0]!.body, "the detail renders a different PNG");
 
     // Foreign sessions and malformed payloads never leak in.
-    const before = calls.length;
     lab.emitBus("gentle-pi:odd-phase/v1", change("closing", "explicit", "another-session"));
     lab.emitBus("gentle-pi:odd-phase/v1", change("scheming", "inferred"));
     lab.emitBus("gentle-pi:odd-phase/v1", change("planning", null));
@@ -1248,6 +1247,188 @@ test("runtime d200On mirrors frames with the effective project title", async () 
     for (const call of mirror) {
       assert.equal(new Headers(call.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("D200 Título"), "the runtime mirror uses the saved title");
     }
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/emote displayOn <address> persists the board globally, keeps loopback, and claims before the frame", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-address-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  const projectDir = join(project, ".pi", "extensions", "gentle-emote");
+  mkdirSync(projectDir, { recursive: true });
+  // The project layer keeps pointing at the old board: it must not shadow an
+  // explicit order. The global layer owns what the rewrite preserves.
+  writeFileSync(join(projectDir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, targets: [
+    { enabled: true, url: "http://matrix/emote" },
+  ] } }));
+  const globalPath = join(profile, "extensions", "gentle-emote", "config.json");
+  mkdirSync(join(profile, "extensions", "gentle-emote"), { recursive: true });
+  writeFileSync(globalPath, JSON.stringify({ size: 12, externalDisplay: { enabled: true, targets: [
+    { enabled: true, url: "http://localhost:8000/emote" },
+    { enabled: true, url: "http://old-board/emote" },
+  ] } }));
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(null, { headers: { "X-Emote-Ownership": "1" } }); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(project, [], profile);
+    await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
+    calls.length = 0;
+    const emote = lab.commands.get("emote");
+    await emote.handler("displayOn 192.168.9.9", lab.ctx); await flush();
+    const claim = calls.indexOf("http://192.168.9.9/emote/claim");
+    const image = calls.indexOf("http://192.168.9.9/emote");
+    assert.ok(claim >= 0, `the named board is claimed: ${JSON.stringify(calls)}`);
+    assert.ok(image > claim, "the claim precedes the refreshed frame");
+    assert.ok(!calls.some(url => url.startsWith("http://matrix/emote")), "a project layer never shadows the explicit board");
+    const saved = JSON.parse(readFileSync(globalPath, "utf8"));
+    assert.deepEqual(saved.externalDisplay.targets, [
+      { enabled: true, url: "http://localhost:8000/emote" },
+      { enabled: true, url: "http://192.168.9.9/emote" },
+    ], "the named board replaces the global non-loopback target and loopback survives");
+    assert.equal(saved.size, 12, "unrelated global keys survive the write");
+    assert.ok(lab.notices.some(notice => notice.message.includes("192.168.9.9")), "the applied address is reported");
+    assert.equal(new OutputStateStore(profile).load(() => {}).display, true, "the display group is saved On");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/emote displayOn <address> refuses an invalid or loopback address and a disabled LED group without writing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-address-refused-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  const projectDir = join(project, ".pi", "extensions", "gentle-emote");
+  const disabledDir = join(root, "disabled", ".pi", "extensions", "gentle-emote");
+  mkdirSync(projectDir, { recursive: true });
+  mkdirSync(disabledDir, { recursive: true });
+  writeFileSync(join(projectDir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, targets: [{ enabled: true, url: "http://matrix/emote" }] } }));
+  writeFileSync(join(disabledDir, "config.json"), JSON.stringify({ externalDisplay: { enabled: false, targets: [{ enabled: true, url: "http://matrix/emote" }] } }));
+  const globalPath = join(profile, "extensions", "gentle-emote", "config.json");
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(project, [], profile);
+    await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
+    const emote = lab.commands.get("emote");
+    for (const input of ["displayOn http://192.168.9.9/emote", "displayOn 192.168.9.9/emote", "displayOn 127.0.0.1", "displayOn localhost:8000", "displayOn user@192.168.9.9"]) {
+      const count = calls.length;
+      await emote.handler(input, lab.ctx); await flush();
+      assert.equal(existsSync(globalPath), false, `${input} never writes the global config`);
+      assert.equal(calls.length, count, `${input} sends nothing`);
+      assert.equal(lab.notices.at(-1)?.level, "warning", `${input} warns`);
+    }
+    await lab.handler;
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    lab = await boot(join(root, "disabled"), [], profile);
+    await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
+    const count = calls.length;
+    await lab.commands.get("emote").handler("displayOn 192.168.9.9", lab.ctx); await flush();
+    assert.equal(existsSync(globalPath), false, "a disabled LED group is never configured behind the user's back");
+    assert.equal(calls.length, count, "a disabled LED group sends nothing");
+    assert.match(lab.notices.at(-1)?.message ?? "", /no enabled LED\/ESP32 display configured/);
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/emote d200On <port> targets that port for this session and never persists it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-d200-port-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  mkdirSync(project, { recursive: true });
+  const globalConfig = join(profile, "extensions", "gentle-emote", "config.json");
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(project, [], profile);
+    const emote = () => lab!.commands.get("emote");
+    await emote().handler("read", lab.ctx); await flush();
+    calls.length = 0;
+    await emote().handler("d200On 9100", lab.ctx); await flush();
+    assert.ok(calls.length > 0, "the mirror delivers frames");
+    assert.ok(calls.every(url => url.startsWith("http://127.0.0.1:9100/")), `every request goes to the session port: ${JSON.stringify(calls)}`);
+    assert.equal(existsSync(globalConfig), false, "the port never enters config.json");
+    assert.equal(new OutputStateStore(profile).load(() => {}).d200, true, "the On preference stays global and persistent");
+    assert.match(lab.notices.at(-1)?.message ?? "", /D200 mirroring on: http:\/\/127\.0\.0\.1:9100\/emote/);
+
+    // A second explicit port replaces the live sender instead of being ignored.
+    calls.length = 0;
+    await emote().handler("d200On 9101", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r2" }); await flush();
+    assert.ok(calls.some(url => url.startsWith("http://127.0.0.1:9101/")), "the new port delivers");
+    assert.ok(!calls.some(url => url.startsWith("http://127.0.0.1:9100/")), `the replaced sender stops: ${JSON.stringify(calls)}`);
+
+    // The port is session-local: a reload restores the saved On state at the
+    // default port, because no port was ever written anywhere.
+    calls.length = 0;
+    await lab.emit("session_start");
+    // The reloaded sender starts empty, so a normal state transition is what
+    // pushes the next frame: emulate the host with a different tool.
+    await lab.emit("tool_execution_start", { toolName: "edit", toolCallId: "r3" }); await flush();
+    assert.ok(calls.some(url => url.startsWith("http://127.0.0.1:8003/")), `a reload falls back to the default port: ${JSON.stringify(calls)}`);
+    assert.ok(!calls.some(url => url.startsWith("http://127.0.0.1:9101/")), "the session port does not survive a reload");
+
+    await emote().handler("d200Off", lab.ctx); await flush();
+    calls.length = 0;
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r4" }); await flush();
+    assert.equal(calls.length, 0, "d200Off still stops every D200 port");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/emote d200On <port> refuses an invalid port without changing the mirror or the preference", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-d200-port-refused-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  mkdirSync(project, { recursive: true });
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "d200.json");
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  const inputs = ["d200On 0", "d200On 65536", "d200On abc", "d200On 80.5", "d200On 127.0.0.1:9000", "d200On 9100/emote", "d200On -1"];
+  try {
+    lab = await boot(project, [], profile);
+    await lab.commands.get("emote").handler("read", lab.ctx); await flush();
+    // Nothing is on yet: a refused port must not enable the mirror or save anything.
+    for (const input of inputs) {
+      const count = calls.length;
+      await lab.commands.get("emote").handler(input, lab.ctx); await flush();
+      assert.equal(calls.length, count, `${input} sends nothing`);
+      assert.equal(lab.notices.at(-1)?.level, "warning", `${input} warns`);
+      assert.match(lab.notices.at(-1)?.message ?? "", /invalid D200 port \(1-65535\); D200 mirror unchanged/, input);
+    }
+    assert.equal(existsSync(savedState), false, "a refused port never saves the On preference");
+
+    // While mirroring on a session port, a refused port leaves that sender alone.
+    await lab.commands.get("emote").handler("d200On 9100", lab.ctx); await flush();
+    for (const input of inputs) {
+      const count = calls.length;
+      await lab.commands.get("emote").handler(input, lab.ctx); await flush();
+      assert.equal(calls.length, count, `${input} keeps the live sender silent`);
+      assert.match(lab.notices.at(-1)?.message ?? "", /invalid D200 port/);
+    }
+    calls.length = 0;
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" }); await flush();
+    assert.ok(calls.length > 0 && calls.every(url => url.startsWith("http://127.0.0.1:9100/")), `the session port still delivers: ${JSON.stringify(calls)}`);
+    assert.equal(new OutputStateStore(profile).load(() => {}).d200, true, "the saved preference is untouched");
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });

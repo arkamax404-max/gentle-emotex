@@ -23,7 +23,8 @@ import { createWidgetFactory } from "./widget.ts";
 import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
 import { ExternalDisplay, ExternalDisplays, type SelectedImage, type FrameSink } from "./external_display.ts";
-import { createD200Display, d200Url } from "./d200_display.ts";
+import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
+import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
 import { SubagentTaskTracker } from "./subagent_activity.ts";
 import { WORK_PHASES, WorkPhaseTracker, isWorkPhase } from "./work_phase.ts";
@@ -108,9 +109,9 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   status: "show the last selected PNG, work phase source and activity snapshot (read-only diagnostic)",
   localOn: "resume delivery to configured localhost simulators",
   localOff: "pause localhost delivery without affecting the ESP32",
-  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003",
+  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003; d200On <port> uses that port for this session only",
   d200Off: "stop mirroring to the Ulanzi D200 key",
-  displayOn: "resume LED/ESP32 delivery and claim the display for this session",
+  displayOn: "resume LED/ESP32 delivery and claim the display for this session; displayOn <address> points the group at that board",
   displayOff: "pause LED/ESP32 delivery and release this session's claim",
 };
 
@@ -198,6 +199,10 @@ export default function (pi: ExtensionAPI) {
   const ownsSharedDisplays = process.env.GENTLE_PI_AGENTS_CHILD !== "1";
   let externalDisplay: ExternalDisplays | null = null;
   let d200Display: ExternalDisplay | null = null;
+  /** Explicit `/emote d200On <port>` choice: session-local, cleared by every session start. */
+  let d200Port: number | null = null;
+  /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
+  let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
 
   /** Host usage is optional on older Pi versions; never infer context from text. */
@@ -289,29 +294,40 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  /** Dedicated D200 mirror, independent of configured external destinations. */
-  function setD200Display(enabled: boolean, ctx: any): void {
+  /**
+   * Dedicated D200 mirror, independent of configured external destinations.
+   * `requestedPort` is the session-local choice from `/emote d200On <port>`: it
+   * overrides the default for this session and is never persisted, so a reload
+   * falls back to `GENTLE_EMOTE_D200_PORT`/8003. Naming another port while the
+   * mirror is on replaces the sender instead of being silently ignored.
+   */
+  function setD200Display(enabled: boolean, ctx: any, requestedPort?: number): void {
     if (!ownsSharedDisplays) return;
     if (enabled) {
-      if (d200Display?.enabled) {
-        ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring already on: ${d200Url()}`, "info");
+      if (requestedPort !== undefined) d200Port = requestedPort;
+      const port = d200Port ?? resolveD200Port();
+      if (d200Display?.enabled && d200LivePort === port) {
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring already on: ${d200Url(port)}`, "info");
         return;
       }
       d200Display?.dispose();
       d200Display = createD200Display({
+        port,
         fetcher: fetch,
         report: (message) => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),
         sessionId: sessionId(),
         projectName: typeof cwd === "string" ? basename(cwd) : "",
       });
+      d200LivePort = port;
       if (projectTitle !== null) d200Display.setTitle(projectTitle);
       refreshContextUsage(ctx);
       d200Display.updateActivity(displayActivity.snapshot());
       renderer.setFrameSink?.(frameSink());
       refreshCurrentFrame();
-      ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring on: ${d200Url()}`, "info");
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring on: ${d200Url(port)}`, "info");
       return;
     }
+    d200LivePort = null;
     if (!d200Display) {
       ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring already off`, "info");
       return;
@@ -592,7 +608,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent; displayOn claims the LED display for this session, displayOff releases it)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
@@ -626,6 +642,69 @@ export default function (pi: ExtensionAPI) {
         loadEmoteSet(next ?? resolveEmoteSet(latestModel, latestThinking, config.emotes));
         refreshCurrentFrame();
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar: ${next ?? "auto"}`, "info");
+        return;
+      }
+      // `/emote displayOn <address>` names a board directly. Writing the global
+      // config is this command's documented exception to "output commands never
+      // touch config.json", because the address must survive /reload.
+      if (name.startsWith("displayOn ")) {
+        const parsed = parseDisplayAddress(name.slice("displayOn".length).trim());
+        if (parsed.error !== null) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${parsed.error}; LED destinations unchanged`, "warning");
+          return;
+        }
+        // The address configures the LED group, so the group must already be
+        // enabled: a disabled output is never turned on by naming a board.
+        if (!externalDisplay?.enabled) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] no enabled LED/ESP32 display configured; address not applied`, "warning");
+          return;
+        }
+        const saved = persistGlobalDisplayTarget(parsed.url as string);
+        if (!saved.ok) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${saved.error}; LED destinations unchanged`, "error");
+          return;
+        }
+        try { outputState.save("display", true); }
+        catch {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global display state; output unchanged`, "error");
+          return;
+        }
+        // Reload the layers so the persisted address is what the new sender uses,
+        // then rebuild it: destinations are immutable per session.
+        ({ config } = loadLayeredConfig(extDir, cwd));
+        const report = (message: string) => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning");
+        externalDisplay?.dispose();
+        // The named board must win even when a project layer still configures the
+        // previous one: persistence records the choice, this override executes it.
+        externalDisplay = ownsSharedDisplays
+          ? new ExternalDisplays(withDisplayTarget(config.externalDisplay, parsed.url as string), fetch, report, sessionId(), typeof cwd === "string" ? basename(cwd) : "")
+          : null;
+        const savedStates = outputState.load(report);
+        externalDisplay?.setDebugEnabled(savedStates.debug);
+        externalDisplay?.setDisplayEnabled(savedStates.display);
+        renderer.setFrameSink?.(frameSink());
+        // A fresh sender retains no frame, so the reservation comes first and the
+        // current selection is pushed through the existing animation pipeline.
+        externalDisplay?.claimDisplays();
+        refreshCurrentFrame();
+        const kept = saved.loopbackPreserved > 0 ? `; ${saved.loopbackPreserved} loopback target preserved` : "";
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] LED/ESP32 display: ${parsed.url}${kept}`, "info");
+        return;
+      }
+      // `/emote d200On <port>` picks the key receiver port. Only the On preference
+      // is global; the port belongs to this session and is written nowhere.
+      if (name.startsWith("d200On ")) {
+        const parsed = parseD200Port(name.slice("d200On".length).trim());
+        if (parsed.port === null) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${parsed.error}; D200 mirror unchanged`, "warning");
+          return;
+        }
+        try { outputState.save("d200", true); }
+        catch {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global d200 state; output unchanged`, "error");
+          return;
+        }
+        setD200Display(true, ctx, parsed.port);
         return;
       }
       const output = OUTPUTS.find(output => name === `${outputCommandName(output)}On` || name === `${outputCommandName(output)}Off`);
@@ -733,6 +812,9 @@ export default function (pi: ExtensionAPI) {
     externalDisplay?.setDebugEnabled(states.debug);
     externalDisplay?.setDisplayEnabled(states.display);
     d200Display?.dispose();
+    // The port is session-local: a fresh session never inherits another one's choice.
+    d200Port = null;
+    d200LivePort = null;
     d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
     applyProjectTitle();
     refreshContextUsage(ctx);
