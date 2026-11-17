@@ -131,9 +131,9 @@ A source that is already configured keeps loading until it is updated or removed
 | `/emote internalOn` | Shows the terminal avatar again without disabling external delivery |
 | `/emote localOff` | Pauses POSTs to configured localhost simulators; ESP32 delivery continues |
 | `/emote localOn` | Resumes localhost delivery immediately with the latest PNG and activity |
-| `/emote d200On` | Mirrors frames to a Ulanzi D200 key on `127.0.0.1:8003`, independently of `config.json` |
+| `/emote d200On` | Mirrors frames to a Ulanzi D200 key on `127.0.0.1:8003`, independently of `config.json`; `/emote d200On <port>` uses that port for this session only |
 | `/emote d200Off` | Stops the D200 mirror without touching configured destinations |
-| `/emote displayOn` | Resumes delivery to configured non-loopback LED/ESP32 destinations and claims the display for this session; firmware without session ownership keeps ordinary delivery with a one-time warning |
+| `/emote displayOn` | Resumes delivery to configured non-loopback LED/ESP32 destinations and claims the display for this session; firmware without session ownership keeps ordinary delivery with a one-time warning. `/emote displayOn <address>` points the group at that board and saves it in the user-global config |
 | `/emote displayOff` | Pauses LED/ESP32 delivery and releases this session's reservation, without affecting the terminal, simulators or D200 |
 | `/emote title <text>` | Sets the caption above the avatar on every external display for this project, saved in `.pi/extensions/gentle-emote/title.json`; bare `/emote title` restores the project folder basename |
 
@@ -213,7 +213,15 @@ The `internal`, `debug`, `d200` and `display` outputs are **off by default**. Ea
 
 `localOn` / `localOff` control configured loopback destinations (`localhost`, `.localhost`, IPv4 127/8 and IPv6 `::1`). They replace the old `debugOn` / `debugOff` subcommands (not aliases); existing saved choices remain in `output-states/debug.json`, with no migration or preference reset. `displayOn` / `displayOff` control configured non-loopback LED/ESP32 destinations. Each Off aborts that group's active requests, drops pending frames and sends a bodyless `release` control request; On resumes with the latest selection and activity and sends a bodyless `claim` request that reserves the display for this session, ordered before any later image (a repeated `displayOn` re-claims even while already enabled). Destinations qualify for the reservation only with session identity and the exact `/emote` URL without a query; an explicit `displayOn` on a destination that cannot qualify warns once and keeps ordinary delivery without claiming exclusivity, while restoring the saved preference at startup resumes delivery as before and never claims. Heartbeats renew the reservation every 5 s while the destination stays enabled, even before the first frame is sent and while the receiver runs its own clock in `idleClock: "receiver"`; entering `idleClock: "silence"` deliberately stops them, so the reservation lapses 30 s after traffic stops and a later explicit `displayOn` reclaims it. Firmware without session ownership answers `404`/`405` or a `200` without the `X-Emote-Ownership` marker: delivery continues as before with a one-time warning and no exclusivity is reported; a `409` conflict is likewise a warned non-success without an automatic re-claim. Neither group affects the dedicated D200 mirror or diagnostic logging (`config.debug`).
 
-Output commands do not write `config.json`, invent destinations or enable entries explicitly disabled in configuration. An On preference can be saved before configuring its destination, but delivery still requires valid, enabled external-display configuration. Unreadable or malformed saved preferences leave that output off with a warning; a failed save reports an error and leaves the current output unchanged.
+Output commands do not write `config.json`, invent destinations or enable entries explicitly disabled in configuration, with one documented exception: `/emote displayOn <address>` rewrites the LED destination in the **user-global** config, because a named board has to survive `/reload`. An On preference can be saved before configuring its destination, but delivery still requires valid, enabled external-display configuration. Unreadable or malformed saved preferences leave that output off with a warning; a failed save reports an error and leaves the current output unchanged.
+
+### Naming a board from the command
+
+`/emote displayOn <address>` points the LED/ESP32 group at the board you name instead of the one in configuration. `<address>` is a host token only — IPv4, a bracketed IPv6 address or a DNS name, optionally with `:port` — normalized to exactly `http://<address>/emote`. A scheme, path, credentials, query, fragment or other punctuation is refused with `invalid display address`; loopback addresses are refused with `loopback addresses belong to /emote localOn`, because they belong to the local group.
+
+The accepted address is written to the user-global `<agent dir>/extensions/gentle-emote/config.json` as the only non-loopback LED destination: every other non-loopback target is replaced rather than accumulated, while loopback targets (the desktop simulator) and unrelated keys survive — the local group and the D200 key are separate outputs. A legacy single `url` that is loopback migrates into `targets`. The write is atomic, so an interrupted save cannot truncate your config, and it fails closed with `cannot read the global config` or `cannot write the global config` instead of replacing a file it cannot parse; the LED destinations then stay unchanged. The named board also wins over a project layer that still points at the previous one, because configuration layers are not rewritten by a command.
+
+The command requires the LED group to be enabled already: with no enabled external display it warns `no enabled LED/ESP32 display configured; address not applied` and writes nothing, because an output is never switched on by naming a board. On success it saves the `display` preference On, rebuilds this session's sender, claims the display before the first image, and reports `LED/ESP32 display: http://<address>/emote`, followed by `; 1 loopback target preserved` when a loopback destination survived.
 
 ## Mirror to an external 64×64 display
 
@@ -271,7 +279,7 @@ The boolean defaults to `false`: existing simulator/hardware output stays opaque
 
 Optional `background` accepts an RGB hex color (`"#000000"` by default). It composites genuinely transparent pixels only within the drawn sprite PNG bounds; outer canvas padding and the text area stay black. **opaque black pixels in sprites remain black**. Set `"background": "#404040"` on the parent to try a dim gray on both destinations, or on one target to override it independently. Invalid color values disable that destination. Very dark grays may quantize to black on low-bit-depth panels. Optional `backgroundCoverage` (0–1, default 1) applies a fixed 4×4 ordered dither to the transparency background only; `0.75` retains 75% gray pixels and uses black for the rest. Coverage has 1/16 increments and is inherited/overridden per target. This reduces apparent background brightness without temporal flicker or changing opaque artwork.
 
-Run `/reload`, open the simulator in your browser, then `/emote localOn` and `/emote demo`. For the LED/ESP32, use `/emote displayOn`. Stop each group with its corresponding Off command; the choice persists. Shutdown/reload aborts pending delivery, then the next session restores saved preferences.
+Run `/reload`, open the simulator in your browser, then `/emote localOn` and `/emote demo`. For the LED/ESP32, use `/emote displayOn`, or `/emote displayOn 192.168.1.129` to point the group at that board and save it. Stop each group with its corresponding Off command; the choice persists. Shutdown/reload aborts pending delivery, then the next session restores saved preferences.
 
 - **Trust:** project config can override destinations through the normal layered merge; saved `localOn` or `displayOn` preferences allow delivery to those enabled destinations. Review it before using this extension in a project. Use only local, trusted destinations: this iteration has no authentication; HTTP is unencrypted. Do not expose the receiver publicly. URLs must explicitly use HTTP(S), without credentials or fragments. No prompts, tool arguments, file paths, or credentials are sent. When a session identity is available, PNG requests include it for independent avatar routing.
 - **Options:** disabled by default; URL defaults to empty (no implicit destination). `timeoutMs` defaults to `1000` and must be finite between `1` and `30000` inclusive. Invalid options safely disable networking without disabling the local avatar.
@@ -327,6 +335,15 @@ to the terminal: selected avatar frames with labels and no outline are POSTed to
 - The toggle is **global and persistent**, initially off. It never writes `config.json` or changes
   configured `externalDisplay` destinations. Only `/emote d200On` and `/emote d200Off` change its
   saved preference.
+- `/emote d200On <port>` uses that TCP port for the current session instead of the default, for a key
+  client that listens somewhere else. The port is **never written anywhere**: the On preference stays
+  global, while the port returns to `GENTLE_EMOTE_D200_PORT`/`8003` at the next `/reload` or restart.
+  Naming another port while the mirror is already on replaces the sender instead of being ignored.
+  Only a bare decimal port in `1`–`65535` is accepted; `0`, `65536`, `-1`, `+8003`, `80.5`, `1e3`,
+  `0x1f90`, `abc`, `127.0.0.1:9000`, `9100/emote` and URLs are refused with
+  `invalid D200 port (1-65535); D200 mirror unchanged`, and an empty argument with
+  `missing D200 port; D200 mirror unchanged`. A refused port sends nothing, leaves the live mirror
+  alone and leaves the saved preference untouched.
 - Port **8003** keeps the key clear of the browser simulator (`8000`) and of the ESP32 firmware
   (`80`). `GENTLE_EMOTE_D200_PORT` overrides it for local experiments.
 - Enabling it mid-session starts with the current activity labels and re-sends the current frame.

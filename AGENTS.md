@@ -10,10 +10,10 @@ All four output groups default to off independently; keep the extension's `enabl
 |--------|----------|-------|
 | Terminal avatar | `/emote internalOn`, `/emote internalOff` | Terminal graphics/ASCII only |
 | Local simulators | `/emote localOn`, `/emote localOff` | Configured loopback targets; existing `debug.json` preference key is unchanged |
-| Ulanzi D200 key | `/emote d200On`, `/emote d200Off` | Dedicated mirror at `127.0.0.1:8003` |
-| LED/ESP32 display | `/emote displayOn`, `/emote displayOff` | Configured non-loopback targets |
+| Ulanzi D200 key | `/emote d200On`, `/emote d200On <port>`, `/emote d200Off` | Dedicated mirror at `127.0.0.1:8003`; the port is session-local |
+| LED/ESP32 display | `/emote displayOn`, `/emote displayOn <address>`, `/emote displayOff` | Configured non-loopback targets, or the named board |
 
-Each command persists its boolean globally under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`, independent of project configuration. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Saved choices survive project changes, restarts and reloads; running sessions restore changes from other sessions at their next start/reload. Commands affect their current session immediately. They never rewrite `config.json`; debug/display delivery still requires valid enabled configured destinations. Tests must use temporary agent directories, never the real user profile. Malformed preferences fail closed with a warning; failed saves leave the current output unchanged.
+Each command persists its boolean globally under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`, independent of project configuration. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Saved choices survive project changes, restarts and reloads; running sessions restore changes from other sessions at their next start/reload. Commands affect their current session immediately. They never rewrite `config.json` — with one documented exception: `/emote displayOn <address>` rewrites the `externalDisplay` LED destination in the **user-global** config, because a named board has to survive `/reload`; it replaces non-loopback targets, keeps loopback targets and every unrelated key, writes atomically and fails closed on an unreadable or non-object file. `d200On <port>` writes nothing: the port is this session's only and returns to `GENTLE_EMOTE_D200_PORT`/`8003` at the next start. Debug/display delivery still requires valid enabled configured destinations. Tests must use temporary agent directories, never the real user profile. Malformed preferences fail closed with a warning; failed saves leave the current output unchanged.
 
 ## Persistent avatar selection
 
