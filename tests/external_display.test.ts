@@ -33,7 +33,7 @@ test("session identity is stable per destination and invalid IDs retain legacy d
   }
 });
 
-test("project name rides local image requests only as percent-encoded metadata", async (t) => {
+test("project name rides every image request as percent-encoded metadata and never heartbeats", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const sender = new ExternalDisplays({ ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
@@ -44,13 +44,34 @@ test("project name rides local image requests only as percent-encoded metadata",
     const local = calls.find(call => call.url === options.url)!;
     const remote = calls.find(call => call.url === "http://matrix/emote")!;
     assert.equal(new Headers(local.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"));
-    assert.equal(new Headers(remote.init.headers).get("X-Emote-Project-Name"), null, "LAN targets stay anonymous");
+    assert.equal(new Headers(remote.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "the LAN image carries the same encoded metadata");
     sender.updateActivity({ status: "busy", phase: "executing", activeSubagents: 0 });
     await tick();
     assert.equal(calls.length, 4, "activity changes resend local and remote images");
     t.mock.timers.tick(5000); await tick();
     assert.equal(calls.length, 6, "each destination answers with one heartbeat");
     assert.ok(calls.slice(-2).every(call => call.init.body === undefined && new Headers(call.init.headers).get("X-Emote-Project-Name") === null), "heartbeats carry no project metadata");
+  } finally { sender.dispose(); }
+});
+
+test("the project name never rides claim or release control requests", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const sender = new ExternalDisplays(
+    { enabled: true, url: "http://matrix/emote", timeoutMs: 1000 },
+    async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(null, { headers: { "X-Emote-Ownership": "1" } }); },
+    () => {}, "session-A", "mi repo ñ");
+  try {
+    sender.claimDisplays(); await tick();
+    sender.select(frame()); await tick();
+    sender.releaseDisplays(); await tick(); await tick();
+    const claim = calls.find(call => call.url === "http://matrix/emote/claim");
+    const release = calls.find(call => call.url === "http://matrix/emote/release");
+    const image = calls.find(call => call.url === "http://matrix/emote");
+    assert.ok(claim && release && image, "claim, image and release all reach the destination");
+    assert.equal(new Headers(claim!.init.headers).get("X-Emote-Project-Name"), null, "claims are bodyless controls, not images");
+    assert.equal(new Headers(release!.init.headers).get("X-Emote-Project-Name"), null, "releases are bodyless controls, not images");
+    assert.equal(new Headers(image!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "the image between them keeps the metadata");
   } finally { sender.dispose(); }
 });
 
@@ -748,7 +769,7 @@ test("local and LAN PNGs gain the captioned layout while headers stay metadata-o
     assert.deepEqual(cachedLocal.data.slice(1 * 64 * 4, 6 * 64 * 4), localExpected.slice(1 * 64 * 4, 6 * 64 * 4), "cached local renders keep the default ink");
     assert.deepEqual(cachedRemote.data.slice(1 * 64 * 4, 6 * 64 * 4), remoteExpected.slice(1 * 64 * 4, 6 * 64 * 4), "cached LAN renders keep the pure green ink");
     assert.equal(new Headers(calls[0]!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "the header stays percent-encoded metadata");
-    assert.equal(new Headers(calls[1]!.init.headers).get("X-Emote-Project-Name"), null, "the header never rides LAN traffic");
+    assert.equal(new Headers(calls[1]!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("mi repo ñ"), "the LAN image carries the same encoded metadata");
   } finally { sender.dispose(); }
 });
 
@@ -786,7 +807,7 @@ test("setTitle re-captions the live selection without touching selection, stream
       assert.notEqual(call.init.body, origin.init.body, "the captioned PNG bytes change");
     }
     assert.equal(new Headers(calls.at(-2)!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("Título Nuevo"), "local metadata follows the title");
-    assert.equal(new Headers(calls.at(-1)!.init.headers).get("X-Emote-Project-Name"), null, "LAN targets stay anonymous");
+    assert.equal(new Headers(calls.at(-1)!.init.headers).get("X-Emote-Project-Name"), encodeURIComponent("Título Nuevo"), "LAN metadata follows the title");
 
     sender.setTitle(null);
     await tick();

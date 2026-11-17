@@ -132,8 +132,10 @@ export class ExternalDisplay {
   private readonly sessionId: string | null;
   // Capture the sending project's working-directory basename for every image
   // destination: immutable per sender, never a full path. The raw basename
-  // labels the captioned PNG layout on all destinations; the percent-encoded
-  // metadata header stays local-only, never attached to LAN traffic.
+  // labels the captioned PNG layout on all destinations, and the percent-encoded
+  // metadata header rides every image request, loopback and LAN alike, so the
+  // panel receiver can bind the session title like the desktop receiver does.
+  // It never rides heartbeats or the bodyless control routes, which are not images.
   private projectName: string | null;
   private displayName: string | null;
   // Captured folder basename: the fallback when a title override resets.
@@ -464,7 +466,7 @@ export class ExternalDisplay {
           "X-Emote-Active-Subagents": String(image.activity.activeSubagents),
           ...(image.activity.workPhase === undefined ? {} : { "X-Emote-Work-Phase": image.activity.workPhase }),
         });
-        if (this.local && this.projectName) headers["X-Emote-Project-Name"] = this.projectName;
+        if (this.projectName) headers["X-Emote-Project-Name"] = this.projectName;
       }
       const limit = this.sessionId ? 18446744073709551615n : 99999999999999999999n;
       if (this.sequence >= limit) throw new Error("sequence exhausted");
