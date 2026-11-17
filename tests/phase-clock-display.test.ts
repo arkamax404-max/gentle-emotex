@@ -23,11 +23,11 @@ function assertPhase(body: Uint8Array, label: string, top = 54) {
   for (let i = 3; i < expected.length; i += 4) expected[i] = 255;
   // Draw letters/digits normally, but pin colon pixels independently.
   const clockStart = label.includes(":") ? label.lastIndexOf(" ") + 1 : label.length;
-  drawDisplayText(expected, label.replace(":", " "), top, index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]);
+  drawDisplayText(expected, label.replace(":", " "), top, index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]);
   const colon = label.indexOf(":");
   if (colon >= 0) {
     const x = Math.floor((64 - (label.length * 4 - 1)) / 2) + colon * 4 + 1;
-    for (const y of [top + 1, top + 3]) expected.set([0, 160, 176, 255], (y * 64 + x) * 4);
+    for (const y of [top + 1, top + 3]) expected.set([241, 189, 101, 255], (y * 64 + x) * 4);
   }
   assert.deepEqual(image.data.slice(top * 64 * 4, (top + 5) * 64 * 4), expected.slice(top * 64 * 4, (top + 5) * 64 * 4), label);
 }
@@ -83,7 +83,7 @@ test("phase clock reaches simulator, LED and D200 without enabling paused/disabl
   const count = calls.length; await advance(10000); assert.equal(calls.length, count);
 });
 
-test("the captioned layout keeps the timed phase row at 58..62 with the muted cyan clock", async t => {
+test("the captioned layout keeps the timed phase row at 58..62 with the amber clock", async t => {
   const advance = virtualTime(t), calls: RequestInit[] = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A", "my_repo");
   try {

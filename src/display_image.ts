@@ -114,7 +114,7 @@ export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActiv
     drawDisplayText(data, label, statusTop, index => index > statusLabel.length ? [255, 255, 0] : color);
     const phaseLabel = timedPhaseLabel(resolvePhaseLabel(activity), activity.phaseElapsedSeconds, activity.activeSubagents);
     const clockStart = phaseLabel.includes(":") ? phaseLabel.lastIndexOf(" ") + 1 : phaseLabel.length;
-    drawDisplayText(data, phaseLabel, phaseTop, index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]);
+    drawDisplayText(data, phaseLabel, phaseTop, index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]);
   }
   // The folder name rides above the avatar, muted, uppercase and truncated by the font.
   // The ink is source-selectable so LED destinations can brighten the title without

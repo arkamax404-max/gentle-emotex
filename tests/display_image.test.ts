@@ -235,7 +235,7 @@ test("error at idle with running subagents shows red SUBAGENTS with a yellow cou
   }));
   assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENTS (1)", index => index > "SUBAGENTS".length ? [255, 255, 0] : [255, 96, 96]), "the status row spells SUBAGENTS in the error red ink with the count yellow");
   const clockStart = "RUNNING 00:38".lastIndexOf(" ") + 1;
-  assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING 00:38", index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]), "the phase clock follows the RUNNING label instead of the selected emote");
+  assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING 00:38", index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]), "the phase clock follows the RUNNING label instead of the selected emote");
   assert.deepEqual(image.data.slice(0, 44 * 64 * 4), plain.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");
   assert.deepEqual(image.data.slice(59 * 64 * 4), plain.data.slice(59 * 64 * 4), "bottom padding is unchanged");
 });
@@ -247,7 +247,7 @@ test("explicit elapsed times render on IDLE and GRANDMA only while subagents are
       status: "busy", phase: "thinking", activeSubagents: 1, state, phaseElapsedSeconds: 38,
     }));
     const clockStart = `${label} 00:38`.lastIndexOf(" ") + 1;
-    assert.deepEqual(phaseRow(timed), referenceRow(54, `${label} 00:38`, index => index >= clockStart ? [0, 160, 176] : [238, 238, 238]), `${label} times with active subagents`);
+    assert.deepEqual(phaseRow(timed), referenceRow(54, `${label} 00:38`, index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]), `${label} times with active subagents`);
     const untimed = decodePng(prepareDisplayImage(base64, {
       status: "busy", phase: "thinking", activeSubagents: 0, state, phaseElapsedSeconds: 38,
     }));
