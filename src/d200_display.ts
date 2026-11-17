@@ -33,7 +33,7 @@ export function createD200Display(options: {
 } = {}): ExternalDisplay {
   const url = d200Url(options.port ?? resolveD200Port());
   return new ExternalDisplay(
-    { enabled: true, url, timeoutMs: 1000 },
+    { enabled: true, url, timeoutMs: 1000, idleClock: "receiver" },
     options.fetcher ?? fetch,
     options.report ?? (() => {}),
     options.sessionId ?? null,

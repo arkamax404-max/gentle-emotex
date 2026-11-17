@@ -49,15 +49,15 @@ test("transparentBackground merges across config layers and preserves an explici
   process.env.PI_CODING_AGENT_DIR = agent;
   try {
     const target = { enabled: true, url: "http://localhost/emote" };
-    writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: target }));
-    writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: true } }));
+    writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { ...target, idleClock: "off" } }));
+    writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: true, idleClock: "receiver" } }));
     writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { background: "#404040" } }));
     assert.deepEqual(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), {
-      ...target, timeoutMs: 1000, background: "#404040", transparentBackground: true,
+      ...target, timeoutMs: 1000, background: "#404040", transparentBackground: true, idleClock: "receiver",
     });
-    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: false } }));
+    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: false, idleClock: "silence" } }));
     assert.deepEqual(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), {
-      ...target, timeoutMs: 1000, transparentBackground: false,
+      ...target, timeoutMs: 1000, transparentBackground: false, idleClock: "silence",
     });
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;

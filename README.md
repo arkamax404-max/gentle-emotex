@@ -250,7 +250,7 @@ To send to both the local simulator and a MatrixPortal receiver, replace the sin
 
 ### Transparent PNGs per destination
 
-Set `transparentBackground: true` for a receiver that supports alpha. This preserves the source sprite's RGBA (including partial alpha and opaque black) and makes the **entire canvas** transparent outside the artwork, text and outline ink. Padding and gaps between labels are transparent; text and outline ink remain opaque. The idle clock uses transparent gaps too, with its digits, walkers and path unchanged. No color is removed by chromakey.
+Set `transparentBackground: true` for a receiver that supports alpha. This preserves the source sprite's RGBA (including partial alpha and opaque black) and makes the **entire canvas** transparent outside the artwork, text and outline ink. Padding and gaps between labels are transparent; text and outline ink remain opaque. No color is removed by chromakey.
 
 ```json
 {
@@ -275,9 +275,9 @@ Run `/reload`, open the simulator in your browser, then `/emote localOn` and `/e
 
 - **Trust:** project config can override destinations through the normal layered merge; saved `localOn` or `displayOn` preferences allow delivery to those enabled destinations. Review it before using this extension in a project. Use only local, trusted destinations: this iteration has no authentication; HTTP is unencrypted. Do not expose the receiver publicly. URLs must explicitly use HTTP(S), without credentials or fragments. No prompts, tool arguments, file paths, or credentials are sent. When a session identity is available, PNG requests include it for independent avatar routing.
 - **Options:** disabled by default; URL defaults to empty (no implicit destination). `timeoutMs` defaults to `1000` and must be finite between `1` and `30000` inclusive. Invalid options safely disable networking without disabling the local avatar.
-- **Image:** raw binary PNG, exactly 64×64. In avatar mode, an opaque black canvas by default, with configurable background inside the sprite bounds; `transparentBackground: true` instead preserves source RGBA on a transparent canvas. Post-accent sprites are centered without enlargement in a 48×40 viewport at the top (x=8, y=0 for native sprites), leaving the bottom 24 rows for labels embedded in the PNG: uppercase status and active subagent count (e.g. `BUSY (2)`) at y=44–48 and phase at y=54–58, centered in a native 3×5 pixel font. Status is green (idle), amber (busy), or red (error); the count and parentheses are yellow and appear only when the count is positive (zero or missing counts show the status alone), and phase is near-white light gray (`#eeeeee`). When the phase is `idle`, status is `idle` or `error`, and the active subagent count is positive, the embedded labels instead read exactly `SUBAGENTS (n)` and `RUNNING`; this is display-only, so internal status/phase and protocol headers remain unchanged; a post-error idle parent keeps red status ink. Oversized sprites shrink proportionally with nearest-neighbor sampling. Terminal borders are not mirrored. A separate cache retains at most 32 prepared avatar/clock images.
+- **Image:** raw binary PNG, exactly 64×64. In avatar mode, an opaque black canvas by default, with configurable background inside the sprite bounds; `transparentBackground: true` instead preserves source RGBA on a transparent canvas. Post-accent sprites are centered without enlargement in a 48×40 viewport at the top (x=8, y=0 for native sprites), leaving the bottom 24 rows for labels embedded in the PNG: uppercase status and active subagent count (e.g. `BUSY (2)`) at y=44–48 and phase at y=54–58, centered in a native 3×5 pixel font. Status is green (idle), amber (busy), or red (error); the count and parentheses are yellow and appear only when the count is positive (zero or missing counts show the status alone), and phase is near-white light gray (`#eeeeee`). When the phase is `idle`, status is `idle` or `error`, and the active subagent count is positive, the embedded labels instead read exactly `SUBAGENTS (n)` and `RUNNING`; this is display-only, so internal status/phase and protocol headers remain unchanged; a post-error idle parent keeps red status ink. Oversized sprites shrink proportionally with nearest-neighbor sampling. Terminal borders are not mirrored. A separate cache retains at most 32 prepared avatar images.
 
-On **every image destination** (local simulator, LAN/ESP32 and the D200 key), when a project name was captured, the PNG switches to a compact captioned layout instead: the folder name rides as a green uppercase caption at y=1–5 (one blank pixel row above; centered, truncated at 16 characters, `_` and `.` drawn, accents folded — `ñ` → `N`), a clear gap at y=6–8, the same 48×40 sprite viewport at y=9–48 with any outline reserved inside that region, two separator rows at y=49–50, the status row at y=51–55, a two-pixel gap (y=56–57), the phase row at y=58–62 and a single black pixel at y=63. Phase-clock timing, colors and idle behavior are identical; only the rows move. Invalid or absent names keep the legacy uncaptioned layout on every destination. The synthetic idle-clock face never shows the caption. The caption is display-only: the `X-Emote-Project-Name` header keeps carrying the percent-encoded raw basename unchanged, and still rides loopback/local image requests only (the simulator and the D200 key) — never LAN/ESP32 targets or heartbeats.
+On **every image destination** (local simulator, LAN/ESP32 and the D200 key), when a project name was captured, the PNG switches to a compact captioned layout instead: the folder name rides as a green uppercase caption at y=1–5 (one blank pixel row above; centered, truncated at 16 characters, `_` and `.` drawn, accents folded — `ñ` → `N`), a clear gap at y=6–8, the same 48×40 sprite viewport at y=9–48 with any outline reserved inside that region, two separator rows at y=49–50, the status row at y=51–55, a two-pixel gap (y=56–57), the phase row at y=58–62 and a single black pixel at y=63. Phase-clock timing, colors and idle behavior are identical; only the rows move. Invalid or absent names keep the legacy uncaptioned layout on every destination. A receiver-clock carrier retains the selected avatar's caption; the receiver owns the clock's appearance. The caption is display-only: the `X-Emote-Project-Name` header keeps carrying the percent-encoded raw basename unchanged, and still rides loopback/local image requests only (the simulator and the D200 key) — never LAN/ESP32 targets or heartbeats.
 - **Delivery:** per destination, one request in flight and one replaceable latest pending frame; intermediate frames may be dropped. No retries or redirects. Identical image + state/frame/set + activity selections are deduplicated even on forced terminal redraws. Failure never blocks animation; a failed selection is not retried until a visual change.
 - **Scope:** interactive sessions mirror PNGs even when the terminal only supports ASCII (including forced ASCII in tmux/zellij). Text stays local; PNG animation selection and POST delivery do not require a terminal image protocol. In avatar mode, destinations receive the selected set's post-accent frames, labels and outline. For an explicitly ASCII-only set, external images fall back to the shipped `gentleman` set. Disabled/invalid destinations preserve the original ASCII-only behavior. Headless sessions still do not mirror; hidden widgets may select frames, but this is not a separate headless animation engine. Subagent processes marked with `GENTLE_PI_AGENTS_CHILD=1` do not activate the extension, even when RPC reports a UI: they cannot render an avatar, send HTTP/D200 frames, or change shared output preferences. The primary session retains its normal delegation scenes and subagent count; interactive RPC hosts without the child marker remain supported.
 
@@ -285,24 +285,41 @@ When status is `error` and phase is `idle`, the external display's status row sh
 
 Optional `outline: "#ffffff"` adds a one-pixel external white silhouette to display PNGs only (not terminal art or text labels). It can be inherited from the parent or overridden per target. Sprites with any transparency use their alpha mask; fully opaque sprites treat pure black as background for the outline only. Only background connected to the outside is outlined, so enclosed holes stay untouched. Black artwork touching the external black matte cannot be distinguished from it. The outline may extend one pixel outside the sprite bounds; pixels at the top canvas edge are clipped. Omit the option to disable it.
 
-### Idle clock after five minutes
+### Receiver-owned idle clocks after five minutes
 
-**Experimental:** local functional and loopback performance checks passed, but full validation is incomplete: the global suite retains a known Windows-path failure and independent snapshot evidence could not be reconciled. No physical-device or Wi-Fi performance is claimed.
+**The extension never generates clock faces.** Set `externalDisplay.idleClock` according to each receiver's capability, not its IP address:
 
-After **more than five uninterrupted minutes** with both activity status and phase `idle`, enabled external screens switch to a native 64×64 clock:
+| Mode | After more than five uninterrupted idle minutes |
+|------|-----------------------------------------------|
+| `"off"` (default, including omitted) | Ordinary avatar delivery and session heartbeats continue; no clock handoff |
+| `"receiver"` | Send one existing prepared avatar PNG tagged state `clock`, frame `clock.png`, set `idle-clock`; the desktop utility draws its own clock. Existing session heartbeats continue without periodic PNGs |
+| `"silence"` | Stop both PNGs and heartbeats, clearing pending traffic; the LED receiver enters its autonomous fallback after another **10 seconds** without traffic |
 
-- Local **DD/MM/YYYY** date, stacked **24-hour** hours and minutes, larger seconds, and original pixel walkers along the bottom edge.
-- A **1 Hz** refresh target, rate-limited to at most one clock selection per second even when the source avatar animates faster. Slow receivers still use one active request and one replaceable latest pending image.
-- The same clock on every enabled simulator, LED/ESP32 destination and D200 key. Nothing enables a paused/off output, changes saved preferences or replaces the terminal avatar.
+```json
+{
+  "externalDisplay": {
+    "enabled": true,
+    "idleClock": "off",
+    "targets": [
+      { "enabled": true, "url": "http://127.0.0.1:8001/emote", "idleClock": "receiver" },
+      { "enabled": true, "url": "http://gentle-matrix.local/emote", "idleClock": "silence" }
+    ]
+  }
+}
+```
 
-Busy/error activity, a non-idle phase, a detailed work phase, active subagents or an explicit non-idle frame preview cancels the idle deadline. The plain `idle` avatar state and the `grandma` avatar both keep the clock eligible: prolonged grandma switches to the same clock after more than five minutes, and a grandma that appears during continuous idle inherits the elapsed idle budget instead of restarting the delay. While the grandma avatar is visible before that deadline it still never carries the MM:SS phase counter. Its separate 30-second grandma timer is unchanged. When activity resumes, the remembered avatar returns through the normal delivery queue. Reload/recreation starts a fresh deadline; elapsed idle time uses a monotonic clock rather than wall-clock time.
+The optional field accepts only the exact strings `"off"`, `"receiver"` and `"silence"`; other values (including `null`, booleans and differently cased strings) disable the affected destination with a configuration warning. Targets inherit the parent mode unless overridden; normal field-by-field config layering applies, while `targets` arrays are replaced as a whole. No mode is inferred from loopback/LAN addressing. Nothing enables paused/off outputs, changes saved preferences or replaces the terminal avatar.
 
-The clock uses its own black canvas by default, or a transparent canvas when that destination has `transparentBackground: true`. Its fixed readable palette is unchanged; avatar `background`, `backgroundCoverage`, accent and silhouette outline do not affect it. There are no clock-specific commands or configuration fields. `/emote status` still reports the renderer's **source avatar PNG**; receiver headers identify the delivered clock as state `clock`, frame `clock.png`, set `idle-clock`.
+Both activity status and phase must remain `idle`. Busy/error activity, a non-idle phase, a detailed work phase, active subagents or an explicit non-idle frame preview cancels the deadline. The `idle` and `grandma` states share one continuous idle budget: switching between them does not restart it. Grandma's separate timer and its untimed phase row without subagents are unchanged. Eligibility uses monotonic time and is strictly **more than** five minutes; reload/recreation starts a fresh deadline.
+
+Receiver mode reuses the selected avatar's prepared bytes (including its original state labels, caption, transparency and outline), not a fabricated raster. No source sprite means no carrier or clock session. Ambient animation selections and title changes are remembered without uploading more carriers; activity restores the latest selection and caption immediately through the normal bounded queue. Silence mode also resumes ordinary delivery immediately on activity. Already in-flight requests may finish, but stale pending traffic is dropped or replaced. Paused outputs send nothing; resuming while still ambient honors the configured mode.
+
+Clock appearance and animation belong entirely to the receiver. `/emote status` continues reporting the renderer's **source avatar PNG**. The existing **1 Hz phase elapsed-time scheduler** remains active for ordinary work phases; it is independent of this idle handoff.
 
 ### Ulanzi D200 key
 
 `/emote d200On` adds a destination for the [Ulanzi D200 key client](../gentle-emote-d200) that lives next
-to the terminal: selected avatar frames with labels/outline, or the idle clock, are POSTed to
+to the terminal: selected avatar frames with labels/outline are POSTed to
 `http://127.0.0.1:8003/emote`. `/emote d200Off` disposes it.
 
 - The toggle is **global and persistent**, initially off. It never writes `config.json` or changes
@@ -311,6 +328,7 @@ to the terminal: selected avatar frames with labels/outline, or the idle clock, 
 - Port **8003** keeps the key clear of the browser simulator (`8000`) and of the ESP32 firmware
   (`80`). `GENTLE_EMOTE_D200_PORT` overrides it for local experiments.
 - Enabling it mid-session starts with the current activity labels and re-sends the current frame.
+- The mirror explicitly uses `idleClock: "receiver"`: one cached avatar carrier with clock metadata and existing heartbeats. **Clock rendering in the D200 receiver is pending implementation**; this prepares the same handoff as the desktop without generating clock artwork here.
 - The key press has no behaviour yet: the device only displays.
 
 ### Receiver protocol v1
@@ -326,7 +344,7 @@ to the terminal: selected avatar frames with labels/outline, or the idle clock, 
 | `X-Emote-Work-Phase` | Optional detailed ODD work phase from the native Gentle Shell bus or a successful explicit `gentle_odd_phase` call: `authorizing`, `exploring`, `researching`, `deciding`, `planning`, `implementing`, `checking`, or `closing`; omitted when neither source supplies a phase |
 | `X-Emote-Active-Subagents` | Nonnegative count of active subagent tasks (native task lifecycle when observed, otherwise in-flight tool calls) |
 | `X-Emote-Frame` | Selected filename, e.g. `think.png`, or `clock.png` for the idle clock |
-| `X-Emote-Set` | Actual avatar set directory basename, never its path; `idle-clock` for the synthetic clock face |
+| `X-Emote-Set` | Actual avatar set directory basename, never its path; `idle-clock` for the receiver-clock carrier |
 | `X-Emote-Session-Id` | Optional stable host session ID; absent when unavailable or invalid |
 | `X-Emote-Project-Name` | Optional sending project name: the working directory's folder basename only (for example `gentle-emotex`), never the full path, percent-encoded UTF-8 for safe HTTP transport; sent only on image requests to loopback/local destinations (the desktop simulator and the D200 key), never on LAN/ESP32 targets or heartbeats; omitted when unavailable, empty, oversized, path-like (separators or dot segments), control characters or malformed Unicode — invalid names never fail delivery. Avatar PNGs on every image destination additionally draw the name as a green caption above the sprite (see the captioned layout below) |
 | `X-Emote-Stream-Id` | Random UUID per destination sender lifetime |
@@ -365,7 +383,7 @@ a valid image or heartbeat**. It retains the final avatar's last image when none
 remain active; a new live session replaces that retained image. A timed-out known
 session can reactivate through newer communication.
 
-Pausing an output or disposing the extension stops its heartbeats. The current
+Pausing an output, entering `idleClock: "silence"` ambient mode, or disposing the extension stops its heartbeats. The current
 shutdown hook does not establish permanent closure versus reload, so this sender
 uses timeout fallback rather than falsely sending a close event. Turn completion
 and idle periods do not close sessions. The receiver supports explicit close for

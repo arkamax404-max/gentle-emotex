@@ -21,7 +21,9 @@ export interface ExternalDisplayConfig {
   enabled: boolean;
   url: string;
   timeoutMs: number;
-  /** Preserve source RGBA on a transparent canvas, including idle clocks. Default false. */
+  /** Ambient clock capability: omitted/off keeps avatars; receiver sends one carrier; silence stops traffic. */
+  idleClock?: "off" | "receiver" | "silence";
+  /** Preserve source RGBA on a transparent canvas. Default false. */
   transparentBackground?: boolean;
   /** RGB background used when composing the opaque display PNG. */
   background?: string;
@@ -30,7 +32,7 @@ export interface ExternalDisplayConfig {
   /** Optional one-pixel external silhouette color. */
   outline?: string;
   /** When present, replaces the legacy single URL with independent destinations. */
-  targets?: Array<{ enabled: boolean; url: string; timeoutMs?: number; transparentBackground?: boolean; background?: string; backgroundCoverage?: number; outline?: string }>;
+  targets?: Array<{ enabled: boolean; url: string; timeoutMs?: number; transparentBackground?: boolean; background?: string; backgroundCoverage?: number; outline?: string; idleClock?: "off" | "receiver" | "silence" }>;
 }
 
 export interface Config {

@@ -1,275 +1,207 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { ExternalDisplay, ExternalDisplays, type DisplayActivity } from "../src/external_display.ts";
+import { ExternalDisplay, ExternalDisplays, normalizeExternalDisplay, type DisplayActivity } from "../src/external_display.ts";
 import { createD200Display } from "../src/d200_display.ts";
 import { encodePng, decodePng } from "../src/png.ts";
 import { prepareDisplayImage } from "../src/display_image.ts";
-import { prepareIdleClockImage } from "../src/idle_clock_image.ts";
 
-const options = { enabled: true, url: "http://127.0.0.1:48000/emote", timeoutMs: 30000 };
+const options = { enabled: true, url: "http://127.0.0.1:48000/emote", timeoutMs: 30000, idleClock: "receiver" };
 const idle: DisplayActivity = { status: "idle", phase: "idle", activeSubagents: 0 };
+const busy: DisplayActivity = { status: "busy", phase: "thinking", activeSubagents: 0 };
 const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([255, 0, 0, 255]) }).toString("base64");
 const frame = (name = "idle.png", state = "idle") => ({ base64, state, frame: name, set: "gentleman" });
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const headers = (call: RequestInit) => new Headers(call.headers);
-const pixels = (call: RequestInit) => decodePng(Buffer.from(call.body as Uint8Array));
 function virtualTime(t: TestContext) {
   let elapsed = 0;
   t.mock.method(performance, "now", () => elapsed);
   t.mock.timers.enable({ apis: ["setInterval", "Date"], now: new Date(2026, 10, 9, 23, 54, 57).getTime() });
-  return { now: () => elapsed, async advance(ms: number) { elapsed += ms; t.mock.timers.tick(ms); await flush(); } };
+  return async (ms: number) => { elapsed += ms; t.mock.timers.tick(ms); await flush(); };
 }
 
-// Explicit expected pixels, independent of the production clock renderer.
-const digits: Record<string, string[]> = {
-  "0": ["111", "101", "101", "101", "111"], "1": ["010", "110", "010", "010", "111"],
-  "2": ["111", "001", "111", "100", "111"], "3": ["111", "001", "111", "001", "111"],
-  "4": ["101", "101", "111", "001", "001"], "5": ["111", "100", "111", "001", "111"],
-  "6": ["111", "100", "111", "101", "111"], "7": ["111", "001", "010", "010", "010"],
-  "8": ["111", "101", "111", "101", "111"], "9": ["111", "101", "111", "001", "111"],
-  "/": ["001", "001", "010", "100", "100"], ":": ["000", "010", "000", "010", "000"],
-};
-function assertText(data: Uint8Array, value: string, left: number, top: number, scale: number, ink: number[]) {
-  for (let i = 0; i < value.length; i++) {
-    const glyph = digits[value[i]!]!;
-    for (let y = 0; y < 5 * scale; y++) for (let x = 0; x < 3 * scale; x++) {
-      const offset = ((top + y) * 64 + left + i * 4 * scale + x) * 4;
-      const expected = glyph[Math.floor(y / scale)]![Math.floor(x / scale)] === "1" ? ink : [0, 0, 0];
-      assert.deepEqual([...data.slice(offset, offset + 4)], [...expected, 255], `${value} pixel ${i}/${x}/${y}`);
-    }
-  }
-}
-
-test("transparent clock clears the whole background while retaining every opaque ink pixel", () => {
-  for (const now of [new Date(2026, 10, 9, 23, 59, 58).getTime(), new Date(2026, 10, 10, 0, 0, 0).getTime()]) {
-    const opaque = decodePng(prepareIdleClockImage(now));
-    const transparent = decodePng(prepareIdleClockImage(now, true));
-    assert.deepEqual([transparent.width, transparent.height], [64, 64]);
-    assert.deepEqual(prepareIdleClockImage(now, false), prepareIdleClockImage(now));
-    let ink = 0, gaps = 0;
-    for (let offset = 0; offset < opaque.data.length; offset += 4) {
-      const rgba = [...opaque.data.slice(offset, offset + 4)];
-      if (rgba.slice(0, 3).some(channel => channel !== 0)) {
-        assert.deepEqual([...transparent.data.slice(offset, offset + 4)], rgba);
-        ink++;
-      } else {
-        assert.deepEqual([...transparent.data.slice(offset, offset + 4)], [0, 0, 0, 0]);
-        gaps++;
-      }
-    }
-    assert.ok(ink > 0 && gaps > 0, "digits, walkers and path remain ink; all gaps become transparent");
-  }
-});
-
-test("clock HTTP delivery inherits transparency per target and retains the opaque override", async t => {
-  const clock = virtualTime(t), calls: Array<{ url: string; init: RequestInit }> = [];
-  const sender = new ExternalDisplays({ ...options, transparentBackground: true, background: "#abcdef", backgroundCoverage: 0, targets: [
-    { ...options }, { ...options, url: "http://matrix.invalid/emote", transparentBackground: false },
-  ] }, async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); });
+test("receiver sends one cached valid avatar carrier strictly past five minutes, without animation/title churn, and restores latest selection", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, null, "project");
   try {
-    sender.select(frame()); await flush(); await clock.advance(301000);
-    const clocks = calls.filter(call => headers(call.init).get("X-Emote-State") === "clock");
-    assert.equal(clocks.length, 2);
-    for (const { url, init } of clocks) {
-      const transparent = url === options.url;
-      assert.deepEqual(Buffer.from(init.body as Uint8Array), prepareIdleClockImage(Math.floor(Date.now() / 1000) * 1000, transparent));
-      assert.deepEqual([...pixels(init).data.slice(0, 4)], [0, 0, 0, transparent ? 0 : 255]);
-      assert.equal(init.method, "POST");
-      assert.equal(headers(init).get("Content-Type"), "image/png");
-      assert.equal(headers(init).get("X-Emote-Version"), "1");
-      assert.equal(headers(init).get("X-Emote-Frame"), "clock.png");
-      assert.equal(headers(init).get("X-Emote-Sequence"), "2");
-    }
+    sender.select(frame("grandma.png", "grandma")); await flush();
+    const original = calls[0]!.body;
+    await advance(300000); assert.equal(calls.length, 1);
+    await advance(1000); assert.equal(calls.length, 2);
+    const carrier = calls[1]!;
+    assert.strictEqual(carrier.body, original, "reuse prepared cached bytes, including original grandma label");
+    assert.deepEqual([decodePng(Buffer.from(carrier.body as Uint8Array)).width, decodePng(Buffer.from(carrier.body as Uint8Array)).height], [64, 64]);
+    for (const [name, value] of Object.entries({ "Content-Type": "image/png", "X-Emote-Version": "1", "X-Emote-State": "clock", "X-Emote-Frame": "clock.png", "X-Emote-Set": "idle-clock", "X-Emote-Status": "idle", "X-Emote-Phase": "idle", "X-Emote-Active-Subagents": "0", "X-Emote-Sequence": "2" })) assert.equal(headers(carrier).get(name), value);
+    for (let i = 0; i < 8; i++) { await advance(250); sender.select(frame(`animation_${i}.png`, "grandma")); await flush(); }
+    assert.equal(sender.setTitle("new title"), true);
+    await advance(10000); assert.equal(calls.length, 2, "ambient clocks belong entirely to receiver");
+    sender.updateActivity(busy); await flush();
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-Frame"), "animation_7.png");
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-Project-Name"), "new%20title");
+    assert.deepEqual(calls.at(-1)!.body, prepareDisplayImage(base64, { ...busy, state: "grandma" }, undefined, undefined, undefined, undefined, "new title"));
+    sender.updateActivity(idle); await flush(); const count = calls.length;
+    await advance(300000); assert.equal(calls.length, count);
+    await advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
   } finally { sender.dispose(); }
 });
 
-test("S1: ordinary PNG protocol remains unchanged through exactly five idle minutes, then resumes the remembered avatar", async t => {
-  const clock = virtualTime(t), calls: RequestInit[] = [];
-  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+test("receiver keeps existing bodyless session heartbeats without periodic PNG uploads", async t => {
+  const advance = virtualTime(t), calls: Array<{ url: string; init: RequestInit }> = [];
+  const sender = new ExternalDisplay(options, async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); }, () => {}, "session-A");
+  try {
+    sender.select(frame()); await flush(); await advance(301000); await flush();
+    const count = calls.filter(call => call.init.body).length;
+    await advance(10000);
+    assert.equal(calls.filter(call => call.init.body).length, count);
+    assert.equal(count, 2);
+    assert.ok(calls.filter(call => !call.init.body).length > 0);
+    for (const call of calls.filter(call => !call.init.body)) {
+      assert.equal(call.url, `${options.url}/heartbeat`);
+      assert.equal(headers(call.init).get("X-Emote-Session-Id"), "session-A");
+      assert.equal(headers(call.init).get("X-Emote-State"), null);
+    }
+    assert.deepEqual(calls.map(call => Number(headers(call.init).get("X-Emote-Sequence"))), calls.map((_, i) => i + 1));
+  } finally { sender.dispose(); }
+});
+
+test("silence suppresses PNGs and session heartbeats at and after ambient deadline, resumes immediately", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay({ ...options, idleClock: "silence" }, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A");
   try {
     sender.select(frame()); await flush();
-    assert.deepEqual(Buffer.from(calls[0]!.body as Uint8Array), prepareDisplayImage(base64, { ...idle, state: "idle" }));
-    await clock.advance(300000);
-    assert.equal(calls.length, 1, "exactly five minutes is not more than five minutes");
-    await clock.advance(1000);
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-Frame"), "clock.png");
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-Set"), "idle-clock");
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-Status"), "idle");
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-Phase"), "idle");
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-Active-Subagents"), "0");
-    sender.select(frame("latest.png"));
-    const busy: DisplayActivity = { status: "busy", phase: "thinking", activeSubagents: 0 };
+    await advance(300000); assert.ok(calls.some(call => call.body === undefined), "exact deadline remains ordinary");
+    await advance(1000); const count = calls.length;
+    sender.select(frame("latest.png")); sender.setTitle("new title");
+    await advance(15000); assert.equal(calls.length, count, "including the LED's ten-second fallback window");
     sender.updateActivity(busy); await flush();
+    assert.equal(calls.length, count + 1);
     assert.equal(headers(calls.at(-1)!).get("X-Emote-Frame"), "latest.png");
-    assert.deepEqual(Buffer.from(calls.at(-1)!.body as Uint8Array), prepareDisplayImage(base64, { ...busy, state: "idle" }));
-    sender.updateActivity(idle); await flush();
-    const count = calls.length;
-    await clock.advance(300000); assert.equal(calls.length, count, "new idle period must start again");
-    await clock.advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-Status"), "busy");
+    await advance(5000); assert.equal(calls.at(-1)!.body, undefined);
   } finally { sender.dispose(); }
 });
 
-test("S2-S3: bottom walkers advance at most once per second even when source animation selects frames more often", async t => {
-  const clock = virtualTime(t), calls: Array<{ at: number; init: RequestInit }> = [];
-  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push({ at: clock.now(), init: init! }); return new Response(); });
+test("silence clears pending ordinary images and heartbeat behind an in-flight request", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = []; let release: (() => void) | undefined;
+  const sender = new ExternalDisplay({ ...options, idleClock: "silence" }, async (_url, init) => {
+    calls.push(init!); if (calls.length === 1) return new Promise(resolve => { release = () => resolve(new Response()); }); return new Response();
+  }, () => {}, "session-A");
   try {
-    sender.select(frame()); await flush(); await clock.advance(301000);
-    assert.equal(headers(calls.at(-1)!.init).get("X-Emote-State"), "clock");
-    const first = pixels(calls.at(-1)!.init);
-    for (let i = 0; i < 8; i++) {
-      await clock.advance(250); sender.select(frame(`animation_${i}.png`)); await flush();
-    }
-    const ambient = calls.filter(call => headers(call.init).get("X-Emote-State") === "clock");
-    assert.equal(ambient.length, 3, "one initial clock plus two 1Hz updates");
-    for (let i = 1; i < ambient.length; i++) assert.ok(ambient[i]!.at - ambient[i - 1]!.at >= 1000);
-    const next = pixels(ambient[1]!.init);
-    assert.deepEqual([next.width, next.height], [64, 64]);
-    assert.notDeepEqual(next.data.slice(55 * 64 * 4), first.data.slice(55 * 64 * 4), "feet/positions advance in the bottom strip");
-    assert.deepEqual(next.data.slice(0, 33 * 64 * 4), first.data.slice(0, 33 * 64 * 4), "walkers do not overlap date or hours");
-    assert.ok([...next.data].every((value, index) => index % 4 !== 3 || value === 255));
-  } finally { sender.dispose(); }
+    sender.select(frame()); sender.select(frame("pending.png"));
+    await advance(301000); release!(); await flush();
+    assert.equal(calls.length, 1, "no pending image or heartbeat survives ambient entry");
+    sender.updateActivity(busy); await flush();
+    assert.equal(calls.length, 2); assert.equal(headers(calls[1]!).get("X-Emote-Frame"), "pending.png");
+  } finally { sender.dispose(); release?.(); }
 });
 
-test("S4: clock PNG uses DD/MM/YYYY, 24-hour digits and 2x seconds, including midnight date rollover", async t => {
-  const clock = virtualTime(t), calls: RequestInit[] = [];
-  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
-  const assertFace = (date: string, hours: string, minutes: string, seconds: string) => {
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
-    const image = pixels(calls.at(-1)!);
-    assert.deepEqual([image.width, image.height], [64, 64]);
-    assertText(image.data, date, 12, 1, 1, [147, 181, 160]);
-    assertText(image.data, hours, 12, 9, 4, [242, 241, 220]);
-    assertText(image.data, minutes, 12, 31, 4, [85, 189, 232]);
-    assertText(image.data, seconds, 46, 33, 2, [241, 189, 101]);
-    assertText(image.data, ":", 43, 35, 1, [241, 189, 101]);
-  };
+test("receiver pending carrier is replaced by latest busy image; disposal aborts active requests", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = []; const release: Array<() => void> = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Promise(resolve => release.push(() => resolve(new Response()))); });
   try {
-    sender.select(frame()); await flush(); await clock.advance(301000);
-    assertFace("09/11/2026", "23", "59", "58");
-    await clock.advance(1000); await clock.advance(1000);
-    assertFace("10/11/2026", "00", "00", "00");
-  } finally { sender.dispose(); }
+    sender.select(frame()); await advance(301000);
+    sender.select(frame("latest.png")); sender.updateActivity(busy);
+    release.shift()!(); await flush();
+    assert.equal(calls.length, 2); assert.equal(headers(calls[1]!).get("X-Emote-State"), "idle");
+    assert.equal(headers(calls[1]!).get("X-Emote-Frame"), "latest.png");
+    assert.equal(headers(calls[1]!).get("X-Emote-Sequence"), "2");
+    sender.dispose(); assert.equal(calls[1]!.signal!.aborted, true);
+    release.shift()!(); await flush(); await advance(10000); assert.equal(calls.length, 2);
+  } finally { sender.dispose(); for (const done of release) done(); }
 });
 
-test("busy/error, active subagents, detailed work and explicit previews reset the deadline; idle restarts after each", async t => {
-  const clock = virtualTime(t);
+test("busy/error, active subagents, detailed work and explicit previews reset eligibility", async t => {
+  const advance = virtualTime(t);
   for (const blocked of [
     { activity: { ...idle, status: "error" as const } },
-    { activity: { ...idle, status: "busy" as const, phase: "thinking" as const } },
-    { activity: { ...idle, phase: "waiting" as const } },
-    { activity: { ...idle, activeSubagents: 1 } },
-    { activity: { ...idle, workPhase: "planning" as const } },
+    { activity: busy }, { activity: { ...idle, phase: "waiting" as const } },
+    { activity: { ...idle, activeSubagents: 1 } }, { activity: { ...idle, workPhase: "planning" as const } },
     { activity: idle, state: "bye" },
   ]) {
     const calls: RequestInit[] = [];
     const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
     try {
       sender.updateActivity(blocked.activity); sender.select(frame("preview.png", blocked.state ?? "idle")); await flush();
-      await clock.advance(301000);
-      assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"));
-      sender.updateActivity(idle); sender.select(frame("idle.png", "idle")); await flush();
-      await clock.advance(300000);
-      assert.notEqual(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
-      await clock.advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
+      await advance(301000); assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"));
+      sender.updateActivity(idle); sender.select(frame()); await flush();
+      await advance(300000); assert.notEqual(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
+      await advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
     } finally { sender.dispose(); }
   }
 });
 
-test("grandma triggers the idle clock like plain idle: no clock exactly five minutes, clock past it, continuous idle budget across idle->grandma, and activity still resets the deadline", async t => {
-  const clock = virtualTime(t), calls: RequestInit[] = [];
+test("idle to grandma preserves continuous idle budget and grandma remains untimed", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
   try {
+    sender.select(frame()); await advance(200000);
     sender.select(frame("grandma.png", "grandma")); await flush();
-    await clock.advance(300000);
-    assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), "exactly five minutes of grandma is not enough");
-    await clock.advance(1000);
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "prolonged grandma emits the clock past five minutes");
-    sender.select(frame("grandma2.png", "grandma")); await flush();
-    await clock.advance(1000);
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "grandma does not stop the active clock");
-
-    sender.updateActivity({ status: "busy", phase: "thinking", activeSubagents: 0 }); await flush();
-    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "grandma", "activity returns the grandma avatar immediately");
-    const after = calls.length;
-    const clockCalls = () => calls.slice(after).filter(call => headers(call).get("X-Emote-State") === "clock");
-    await clock.advance(600000);
-    assert.equal(clockCalls().length, 0, "busy activity stops the clock as before");
-    sender.updateActivity(idle); await flush();
-    await clock.advance(300000);
-    assert.equal(clockCalls().length, 0, "idle after activity restarts the full fresh delay");
-    await clock.advance(1000);
-    assert.equal(clockCalls().length, 1, "idle after activity fires the clock again past five minutes");
+    assert.deepEqual(calls.at(-1)!.body, prepareDisplayImage(base64, { ...idle, state: "grandma" }));
+    await advance(100000); assert.equal(calls.length, 2);
+    await advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
+    assert.strictEqual(calls[1]!.body, calls[2]!.body);
   } finally { sender.dispose(); }
-
-  const idleCalls: RequestInit[] = [];
-  const idleFirst = new ExternalDisplay(options, async (_url, init) => { idleCalls.push(init!); return new Response(); });
-  try {
-    idleFirst.select(frame("idle.png", "idle")); await flush();
-    await clock.advance(200000);
-    idleFirst.select(frame("grandma.png", "grandma")); await flush();
-    assert.equal(headers(idleCalls.at(-1)!).get("X-Emote-State"), "grandma", "grandma shows before the deadline");
-    assert.deepEqual(Buffer.from(idleCalls.at(-1)!.body as Uint8Array), prepareDisplayImage(base64, { ...idle, state: "grandma" }), "grandma carries no MM:SS phase counter");
-    await clock.advance(100000);
-    assert.ok(idleCalls.every(call => headers(call).get("X-Emote-State") !== "clock"), "exactly five shared idle minutes is not enough");
-    await clock.advance(1000);
-    assert.equal(headers(idleCalls.at(-1)!).get("X-Emote-State"), "clock", "the idle budget accumulated before grandma fires the clock");
-  } finally { idleFirst.dispose(); }
 });
 
-test("S5: clock reaches enabled simulator, LED and D200 independently without bypassing output pause or disabled config", async t => {
-  const clock = virtualTime(t), calls: Array<{ url: string; init: RequestInit }> = [];
+test("capability is explicit, inherited and overridden per target, never inferred from host", async t => {
+  const advance = virtualTime(t), calls: Array<{ url: string; init: RequestInit }> = [];
   const fetcher: typeof fetch = async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); };
-  const group = new ExternalDisplays({ enabled: true, targets: [options, { ...options, url: "http://matrix.invalid/emote" }] }, fetcher);
+  const group = new ExternalDisplays({ ...options, targets: [
+    { enabled: true, url: "http://remote.invalid/emote" },
+    { enabled: true, url: options.url, idleClock: "silence" },
+    { enabled: true, url: "http://127.0.0.1:48001/emote", idleClock: "off" },
+  ] }, fetcher);
   const d200 = createD200Display({ port: 48003, fetcher });
-  const disabled = new ExternalDisplay({ ...options, enabled: false }, fetcher);
   try {
-    group.setDebugEnabled(false); group.setDisplayEnabled(false); d200.setPaused(true);
-    group.select(frame()); d200.select(frame()); disabled.select(frame());
-    await clock.advance(301000); assert.equal(calls.length, 0);
-    group.setDebugEnabled(true); group.setDisplayEnabled(true); d200.setPaused(false); await flush();
-    assert.deepEqual(calls.map(call => call.url).sort(), [options.url, "http://matrix.invalid/emote", "http://127.0.0.1:48003/emote"].sort());
-    assert.ok(calls.every(call => headers(call.init).get("X-Emote-State") === "clock"));
-    group.setDebugEnabled(true); group.setDisplayEnabled(true); d200.setPaused(false); await flush();
-    assert.equal(calls.length, 3, "repeated enable is idempotent");
-    group.setDebugEnabled(false); group.setDisplayEnabled(false); d200.dispose();
-    await clock.advance(5000); assert.equal(calls.length, 3);
-    group.setDebugEnabled(true); await flush();
-    assert.equal(calls.length, 4); assert.equal(calls.at(-1)!.url, options.url);
-  } finally { group.dispose(); d200.dispose(); disabled.dispose(); }
+    group.select(frame()); d200.select(frame()); await flush(); await advance(301000);
+    assert.deepEqual(calls.filter(call => headers(call.init).get("X-Emote-State") === "clock").map(call => call.url).sort(), ["http://remote.invalid/emote", "http://127.0.0.1:48003/emote"].sort());
+    assert.equal(calls.length, 6);
+  } finally { group.dispose(); d200.dispose(); }
 });
 
-test("clock delivery retains one active plus latest pending frame, then disposal aborts and prevents later ticks", async t => {
-  const clock = virtualTime(t), calls: RequestInit[] = [], release: Array<() => void> = [];
-  const sender = new ExternalDisplay(options, async (_url, init) => {
-    calls.push(init!);
-    if (headers(init!).get("X-Emote-State") !== "clock") return new Response();
-    return new Promise(resolve => release.push(() => resolve(new Response())));
-  });
-  try {
-    sender.select(frame()); await flush(); await clock.advance(301000);
-    assert.equal(calls.length, 2); assert.equal(headers(calls[1]!).get("X-Emote-State"), "clock");
-    for (let i = 0; i < 5; i++) await clock.advance(1000);
-    assert.equal(calls.length, 2, "slow receiver never creates concurrent requests");
-    release.shift()!(); await flush();
-    assert.equal(calls.length, 3); assert.equal(headers(calls[2]!).get("X-Emote-Sequence"), "3");
-    const latest = pixels(calls[2]!);
-    assertText(latest.data, "03", 46, 33, 2, [241, 189, 101]);
-    sender.updateActivity({ status: "busy", phase: "thinking", activeSubagents: 0 });
-    sender.dispose(); assert.equal(calls[2]!.signal!.aborted, true);
-    release.shift()!(); await flush(); await clock.advance(10000);
-    sender.select(frame()); sender.updateActivity(idle); await flush();
-    assert.equal(calls.length, 3, "no pending activity or periodic clock survives dispose");
-  } finally { sender.dispose(); for (const done of release) done(); }
+test("pause and resume honor receiver/silence modes and never enable disabled outputs", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  for (const idleClock of ["receiver", "silence"]) {
+    const sender = new ExternalDisplay({ ...options, idleClock }, async (_url, init) => { calls.push(init!); return new Response(); });
+    try {
+      sender.setPaused(true); sender.select(frame()); const before = calls.length;
+      await advance(301000); assert.equal(calls.length, before);
+      sender.setPaused(false); await flush(); assert.equal(calls.length, before + (idleClock === "receiver" ? 1 : 0));
+      sender.setPaused(true); sender.select(frame("latest.png")); sender.updateActivity(busy);
+      sender.setPaused(false); await flush(); assert.equal(headers(calls.at(-1)!).get("X-Emote-Frame"), "latest.png");
+      const count = calls.length; sender.setPaused(false); await flush(); assert.equal(calls.length, count);
+    } finally { sender.dispose(); }
+  }
+  const disabled = new ExternalDisplay({ ...options, enabled: false }, async () => { assert.fail("disabled"); });
+  disabled.select(frame()); await advance(301000); disabled.setPaused(false); disabled.dispose();
 });
 
-test("an enabled idle display can produce its clock without an available source sprite", async t => {
-  const clock = virtualTime(t), calls: RequestInit[] = [];
-  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
-  try {
-    sender.updateActivity(idle); await clock.advance(300000); assert.equal(calls.length, 0);
-    await clock.advance(1000); assert.equal(calls.length, 1);
-    assert.equal(headers(calls[0]!).get("X-Emote-State"), "clock");
-    assert.deepEqual([pixels(calls[0]!).width, pixels(calls[0]!).height], [64, 64]);
-  } finally { sender.dispose(); }
+test("no source sprite means no carrier or fabricated clock session", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); }, () => {}, "session-A");
+  try { sender.updateActivity(idle); await advance(311000); assert.equal(calls.length, 0); }
+  finally { sender.dispose(); }
+});
+
+test("off and omitted modes preserve ordinary avatar delivery beyond idle deadline", async t => {
+  const advance = virtualTime(t);
+  for (const idleClock of [undefined, "off"]) {
+    const calls: RequestInit[] = [];
+    const sender = new ExternalDisplay({ ...options, idleClock }, async (_url, init) => { calls.push(init!); return new Response(); });
+    try {
+      sender.select(frame()); await flush(); await advance(301000); assert.equal(calls.length, 1);
+      sender.select(frame("next.png")); await flush(); assert.equal(calls.length, 2);
+      assert.equal(headers(calls[1]!).get("X-Emote-Frame"), "next.png");
+      assert.strictEqual(calls[0]!.body, calls[1]!.body);
+    } finally { sender.dispose(); }
+  }
+});
+
+test("idleClock strictly validates modes and invalid targets consume no requests or sequences", async () => {
+  for (const idleClock of ["off", "receiver", "silence"]) assert.equal(normalizeExternalDisplay({ ...options, idleClock })?.idleClock, idleClock);
+  for (const idleClock of [null, true, 0, "", "Receiver", "auto", [], {}]) {
+    const warnings: string[] = [], calls: RequestInit[] = [];
+    const sender = new ExternalDisplay({ ...options, idleClock }, async (_url, init) => { calls.push(init!); return new Response(); }, message => warnings.push(message));
+    try { assert.equal(sender.enabled, false); sender.select(frame()); await flush(); assert.equal(calls.length, 0); assert.deepEqual(warnings, ["externalDisplay: invalid configuration; disabled"]); }
+    finally { sender.dispose(); }
+  }
 });
