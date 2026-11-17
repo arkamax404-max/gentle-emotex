@@ -198,6 +198,18 @@ export default function (pi: ExtensionAPI) {
   const ownsSharedDisplays = process.env.GENTLE_PI_AGENTS_CHILD !== "1";
   let externalDisplay: ExternalDisplays | null = null;
   let d200Display: ExternalDisplay | null = null;
+  let contextPercent: number | null = null;
+
+  /** Host usage is optional on older Pi versions; never infer context from text. */
+  function refreshContextUsage(ctx: any): void {
+    try {
+      const percent = ctx?.getContextUsage?.()?.percent;
+      contextPercent = typeof percent === "number" && Number.isFinite(percent) && percent >= 0 ? percent : null;
+    } catch { contextPercent = null; }
+    externalDisplay?.setContextUsage(contextPercent);
+    d200Display?.setContextUsage(contextPercent);
+  }
+
   const displayActivity = new DisplayActivityTracker(activity => {
     externalDisplay?.updateActivity(activity);
     d200Display?.updateActivity(activity);
@@ -293,6 +305,7 @@ export default function (pi: ExtensionAPI) {
         projectName: typeof cwd === "string" ? basename(cwd) : "",
       });
       if (projectTitle !== null) d200Display.setTitle(projectTitle);
+      refreshContextUsage(ctx);
       d200Display.updateActivity(displayActivity.snapshot());
       renderer.setFrameSink?.(frameSink());
       refreshCurrentFrame();
@@ -718,6 +731,7 @@ export default function (pi: ExtensionAPI) {
     d200Display?.dispose();
     d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
     applyProjectTitle();
+    refreshContextUsage(ctx);
     displayActivity.reset();
     directWorkPhase = null;
     attachWorkPhase();
@@ -792,8 +806,9 @@ export default function (pi: ExtensionAPI) {
     directWorkPhase = null;
   });
 
-  pi.on("model_select", async (event) => {
+  pi.on("model_select", async (event, ctx) => {
     if (!widgetActive) return;
+    refreshContextUsage(ctx);
     latestModel = event.model?.id ?? "";
     latestThinking = pi.getThinkingLevel();
     switchEmoteSet(latestModel, latestThinking);
@@ -816,7 +831,8 @@ export default function (pi: ExtensionAPI) {
     if (farewellPattern?.test(event.text ?? "")) startFarewell();
   });
 
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, ctx) => {
+    refreshContextUsage(ctx);
     cancelGreeting();
     // The tracker reset drops any stale detail from the previous turn; the
     // handshake recovers the host's current phase (order-safe: a host event
@@ -834,8 +850,10 @@ export default function (pi: ExtensionAPI) {
     animator.setAfterTalkState("idle");
   });
 
-  pi.on("message_update", async (event) => {
-    if (!widgetActive || farewell) return;
+  pi.on("message_update", async (event, ctx) => {
+    if (!widgetActive) return;
+    refreshContextUsage(ctx);
+    if (farewell) return;
     if (event.message?.role !== "assistant") return;
 
     const streamEvent = event.assistantMessageEvent;
@@ -910,8 +928,9 @@ export default function (pi: ExtensionAPI) {
     } else animator.endPrompt();
   });
 
-  pi.on("agent_end", async () => {
+  pi.on("agent_end", async (_event, ctx) => {
     if (!widgetActive) return;
+    refreshContextUsage(ctx);
     directWorkPhase = null;
     displayActivity.reset();
     if (runHadError) displayActivity.set("error", "idle");
@@ -933,9 +952,17 @@ export default function (pi: ExtensionAPI) {
     show("compact");
   });
 
-  pi.on("session_compact", async () => {
+  pi.on("session_compact", async (_event, ctx) => {
+    refreshContextUsage(ctx);
     displayActivity.reset();
     show("idle");
   });
 
+  // turn_end runs after persisted assistant/tool messages; also refresh when
+  // navigating history or when compaction fails without a success event.
+  for (const event of ["turn_start", "turn_end", "session_tree", "session_switch", "session_compact_failed"] as const) {
+    pi.on(event, async (_event, ctx) => {
+      if (widgetActive) refreshContextUsage(ctx);
+    });
+  }
 }

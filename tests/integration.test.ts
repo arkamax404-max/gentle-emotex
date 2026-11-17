@@ -1171,6 +1171,59 @@ test("a malformed stored title override warns, falls back to the folder name and
   }
 });
 
+test("context usage colors session titles across host lifecycle events and runtime D200 enablement", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const root = mkdtempSync(join(tmpdir(), "emote-context-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://localhost:8000/emote" } }));
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const assertTitle = (body: Uint8Array, rgb: number[]) => {
+    const { data } = decodePng(Buffer.from(body));
+    let pixels = 0;
+    for (let i = 64 * 4; i < 6 * 64 * 4; i += 4) {
+      if (data[i] || data[i + 1] || data[i + 2]) { assert.deepEqual(Array.from(data.slice(i, i + 3)), rgb); pixels++; }
+    }
+    assert.ok(pixels > 0);
+  };
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  let percent: number | null = 60;
+  try {
+    lab = await boot(root);
+    Object.assign(lab.ctx, { getContextUsage: () => ({ tokens: percent === null ? null : percent * 1000, contextWindow: 100000, percent }) });
+    calls.length = 0;
+    await lab.emit("session_start");
+    await lab.commands.get("emote").handler("read", lab.ctx); await flush();
+    assert.ok(calls.length > 0);
+    for (const call of calls) assertTitle(call.init.body as Uint8Array, [255, 255, 0]);
+    for (const [event, value, rgb] of [
+      ["turn_end", 81, [255, 0, 0]], ["session_compact", 20, [128, 224, 160]],
+      ["model_select", 80, [255, 255, 0]], ["message_update", 90, [255, 0, 0]],
+      ["session_tree", 10, [128, 224, 160]], ["agent_end", 60, [255, 255, 0]],
+    ] as const) {
+      percent = value; calls.length = 0;
+      await lab.emit(event, event === "model_select" ? { model: { id: "next" } } : {}); await flush();
+      assert.ok(calls.some(call => call.init.body), `${event} refreshes the caption without needing a new avatar`);
+      assertTitle(calls.filter(call => call.init.body).at(-1)!.init.body as Uint8Array, Array.from(rgb));
+    }
+    calls.length = 0;
+    await lab.commands.get("emote").handler("d200On", lab.ctx); await flush();
+    const d200 = calls.filter(call => call.url.includes(":8003/"));
+    assert.ok(d200.length > 0);
+    for (const call of d200) assertTitle(call.init.body as Uint8Array, [255, 255, 0]);
+    percent = null; await lab.emit("turn_end"); await flush();
+    assertTitle(calls.filter(call => call.init.body).at(-1)!.init.body as Uint8Array, [128, 224, 160]);
+    Object.assign(lab.ctx, { getContextUsage: () => { throw new Error("usage unavailable"); } });
+    await lab.emit("turn_end");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runtime d200On mirrors frames with the effective project title", async () => {
   const root = mkdtempSync(join(tmpdir(), "emote-title-d200-"));
   const dir = join(root, ".pi", "extensions", "gentle-emote");

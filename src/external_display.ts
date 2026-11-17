@@ -15,7 +15,8 @@ export interface DisplayActivity {
   /** The host's detailed ODD work phase, when Gentle Shell published one. Optional: omitted when absent. */
   workPhase?: "authorizing" | "exploring" | "researching" | "deciding" | "planning" | "implementing" | "checking" | "closing";
 }
-type Selection = SelectedImage & { activity: DisplayActivity; carrier?: { state: string; title: string | null }; phaseElapsedSeconds?: number };
+type ContextBand = "green" | "yellow" | "red";
+type Selection = SelectedImage & { activity: DisplayActivity; contextBand: ContextBand; carrier?: { state: string; title: string | null }; phaseElapsedSeconds?: number };
 const IDENTIFIER = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
 
 /** Invalid options disable networking, never local rendering. Credentials are not supported. */
@@ -94,6 +95,7 @@ export class ExternalDisplays {
 
   select(image: SelectedImage): void { for (const display of this.displays) display.select(image); }
   updateActivity(activity: DisplayActivity): void { for (const display of this.displays) display.updateActivity(activity); }
+  setContextUsage(percent: number | null): void { for (const display of this.displays) display.setContextUsage(percent); }
   /** Live caption change on every destination; returns the count that accepted it. */
   setTitle(value: string | null): number { let count = 0; for (const display of this.displays) if (display.setTitle(value)) count++; return count; }
   dispose(): void { for (const display of this.displays) display.dispose(); this.displays = []; }
@@ -140,7 +142,8 @@ export class ExternalDisplay {
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   private idleClock = new IdleClock(performance.now());
   // Freeze the selected avatar and caption for the receiver's one-time carrier.
-  private clockCarrier: (SelectedImage & { title: string | null }) | null = null;
+  private clockCarrier: (SelectedImage & { title: string | null; contextBand: ContextBand }) | null = null;
+  private contextBand: ContextBand = "green";
 
   private fetcher: typeof fetch;
   private report: (message: string) => void;
@@ -244,6 +247,18 @@ export class ExternalDisplay {
     return true;
   }
 
+  /** Context affects only caption ink; unknown usage retains the existing green. */
+  setContextUsage(percent: number | null): void {
+    if (this.disposed) return;
+    const band: ContextBand = typeof percent === "number" && Number.isFinite(percent) && percent >= 0
+      ? percent > 80 ? "red" : percent >= 60 ? "yellow" : "green"
+      : "green";
+    if (band === this.contextBand) return;
+    this.contextBand = band;
+    // Receiver clocks retain one frozen carrier; apply the latest band on resume.
+    if (!this.clockCarrier) this.queueLatest();
+  }
+
   private isSilenced(): boolean {
     return this.options?.idleClock === "silence" && this.idleClock.isActive(performance.now());
   }
@@ -262,16 +277,17 @@ export class ExternalDisplay {
       }
       if (!this.selected) return;
       if (!ambient) this.clockCarrier = null;
-      else this.clockCarrier ??= { ...this.selected, title: this.displayName };
+      else this.clockCarrier ??= { ...this.selected, title: this.displayName, contextBand: this.contextBand };
       const image = this.clockCarrier
         ? { base64: this.clockCarrier.base64, state: "clock", frame: "clock.png", set: "idle-clock" }
         : this.selected;
       const carrier = this.clockCarrier ? { state: this.clockCarrier.state, title: this.clockCarrier.title } : undefined;
       const phaseElapsedSeconds = ambient ? undefined : this.phaseElapsed(image, now);
-      const key = JSON.stringify([image.base64, image.state, image.frame, image.set, this.activity, phaseElapsedSeconds]);
+      const contextBand = this.displayName ? (this.clockCarrier?.contextBand ?? this.contextBand) : "green";
+      const key = JSON.stringify([image.base64, image.state, image.frame, image.set, this.activity, phaseElapsedSeconds, contextBand]);
       if (key === this.lastKey) return;
       this.lastKey = key;
-      this.pending = { ...image, activity: { ...this.activity }, ...(carrier === undefined ? {} : { carrier }), ...(phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds }) };
+      this.pending = { ...image, activity: { ...this.activity }, contextBand, ...(carrier === undefined ? {} : { carrier }), ...(phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds }) };
       if (!this.active) void this.drain();
     } catch { this.warn("externalDisplay: selection failed"); }
   }
@@ -321,11 +337,11 @@ export class ExternalDisplay {
         const title = image.carrier ? image.carrier.title : this.displayName;
         const state = image.carrier?.state ?? image.state;
         const layoutKey = title ? `project:${title}:` : "";
-        const cacheKey = `${layoutKey}${JSON.stringify([image.base64, state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds])}`;
+        const cacheKey = `${layoutKey}${JSON.stringify([image.base64, state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds, image.contextBand])}`;
         body = this.cache.get(cacheKey);
         if (!body) {
           // LED targets always get an outline; desktop/D200 loopback targets never do.
-          body = prepareDisplayImage(image.base64, { ...image.activity, state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.local ? undefined : (this.options.outline ?? '#ffffff'), this.options.transparentBackground, title, this.local ? undefined : [0, 255, 0]);
+          body = prepareDisplayImage(image.base64, { ...image.activity, state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.local ? undefined : (this.options.outline ?? '#ffffff'), this.options.transparentBackground, title, image.contextBand === "red" ? [255, 0, 0] : image.contextBand === "yellow" ? [255, 255, 0] : this.local ? undefined : [0, 255, 0]);
           if (this.cache.size >= 32) this.cache.delete(this.cache.keys().next().value!);
           this.cache.set(cacheKey, body);
         }
