@@ -324,7 +324,8 @@ export class ExternalDisplay {
         const cacheKey = `${layoutKey}${JSON.stringify([image.base64, state, image.activity.status, image.activity.phase, image.activity.activeSubagents, image.activity.workPhase, image.phaseElapsedSeconds])}`;
         body = this.cache.get(cacheKey);
         if (!body) {
-          body = prepareDisplayImage(image.base64, { ...image.activity, state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.options.outline, this.options.transparentBackground, title, this.local ? undefined : [0, 255, 0]);
+          // LED targets always get an outline; desktop/D200 loopback targets never do.
+          body = prepareDisplayImage(image.base64, { ...image.activity, state, ...(image.phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds: image.phaseElapsedSeconds }) }, this.options.background, this.options.backgroundCoverage, this.local ? undefined : (this.options.outline ?? '#ffffff'), this.options.transparentBackground, title, this.local ? undefined : [0, 255, 0]);
           if (this.cache.size >= 32) this.cache.delete(this.cache.keys().next().value!);
           this.cache.set(cacheKey, body);
         }

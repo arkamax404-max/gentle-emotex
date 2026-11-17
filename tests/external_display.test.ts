@@ -322,11 +322,12 @@ test("background inherits per target, overrides independently, and rejects inval
   } finally { group.dispose(); }
 });
 
-test("outline inherits per destination and rejects invalid colors", async () => {
+test("outline remains validated and LED colors inherit with per-target overrides", async () => {
   for (const outline of [null, 123, "white", "#fff"]) assert.equal(normalizeExternalDisplay({ ...options, outline }), null);
   const calls: RequestInit[] = [];
   const sender = new ExternalDisplays({ ...options, outline: "#ffffff", targets: [
-    { ...options }, { ...options, outline: "#000000" },
+    { ...options, url: "http://matrix/emote" },
+    { ...options, url: "http://matrix-2/emote", outline: "#00ff00" },
   ] }, async (_url, init) => { calls.push(init!); return new Response(); });
   try {
     sender.select(frame()); await tick();
@@ -334,8 +335,35 @@ test("outline inherits per destination and rejects invalid colors", async () => 
     const index = (18 * 64 + 30) * 4;
     const images = calls.map(call => decodePng(Buffer.from(call.body as Uint8Array)));
     assert.deepEqual([...images[0]!.data.slice(index, index + 4)], [255, 255, 255, 255]);
-    assert.deepEqual([...images[1]!.data.slice(index, index + 4)], [0, 0, 0, 255]);
+    assert.deepEqual([...images[1]!.data.slice(index, index + 4)], [0, 255, 0, 255]);
   } finally { sender.dispose(); }
+});
+
+test("LED outline is mandatory while desktop and D200 ignore configured outlines", async () => {
+  const cases = [
+    { url: "http://matrix/emote", outline: undefined, expected: [255, 255, 255, 255] },
+    { url: options.url, outline: "#ffffff", expected: [0, 0, 0, 255] },
+    { url: "http://127.0.0.1:8003/emote", outline: "#ffffff", expected: [0, 0, 0, 255] },
+  ];
+  for (const { url, outline, expected } of cases) {
+    for (const grouped of [false, true]) {
+      const calls: RequestInit[] = [];
+      const target = { ...options, url };
+      const config = grouped
+        ? { ...options, outline, targets: [target] }
+        : { ...target, outline };
+      const sender = new ExternalDisplays(config, async (_url, init) => { calls.push(init!); return new Response(); });
+      try {
+        sender.select(frame()); await tick();
+        assert.equal(calls.length, 1);
+        const image = decodePng(Buffer.from(calls[0]!.body as Uint8Array));
+        const index = (18 * 64 + 30) * 4;
+        assert.deepEqual([...image.data.slice(index, index + 4)], expected, `${url}, grouped=${grouped}`);
+        const center = (19 * 64 + 31) * 4;
+        assert.deepEqual([...image.data.slice(center, center + 4)], [255, 0, 0, 255], "sprite stays unchanged");
+      } finally { sender.dispose(); }
+    }
+  }
 });
 
 test("debug target detection matches only loopback hosts", () => {
