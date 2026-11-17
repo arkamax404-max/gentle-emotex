@@ -26,7 +26,7 @@ import { ExternalDisplay, ExternalDisplays, type SelectedImage, type FrameSink }
 import { createD200Display, d200Url } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
 import { SubagentTaskTracker } from "./subagent_activity.ts";
-import { ODD_PHASE_CHANGE_EVENT, ODD_PHASE_CURRENT_EVENT, WORK_PHASES, WorkPhaseTracker, isWorkPhase } from "./work_phase.ts";
+import { WORK_PHASES, WorkPhaseTracker, isWorkPhase } from "./work_phase.ts";
 import type { WorkPhase } from "./work_phase.ts";
 import { OutputStateStore, OUTPUTS } from "./output_state.ts";
 import { TitleStore, normalizeTitle } from "./title_state.ts";
