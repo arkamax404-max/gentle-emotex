@@ -94,6 +94,29 @@ test("silence clears pending ordinary images and heartbeat behind an in-flight r
   } finally { sender.dispose(); release?.(); }
 });
 
+test("silence stops frames and heartbeats yet an explicit claim and release still reach the receiver", async t => {
+  const advance = virtualTime(t), calls: Array<{ url: string; init: RequestInit }> = [], reports: string[] = [];
+  const owned = () => new Response(null, { headers: { "X-Emote-Ownership": "1" } });
+  const sender = new ExternalDisplay({ ...options, url: "http://matrix/emote", idleClock: "silence" },
+    async (url, init) => { calls.push({ url: String(url), init: init! }); return owned(); }, message => reports.push(message), "session-A");
+  try {
+    sender.select(frame()); await flush();
+    await advance(5000);
+    assert.equal(calls.at(-1)!.url, "http://matrix/emote/heartbeat", "the reservation renews before silence begins");
+    await advance(295000); await advance(1000);
+    const silent = calls.length;
+    sender.select(frame("latest.png")); await advance(15000); await flush();
+    assert.equal(calls.length, silent, "no frame and no heartbeat reaches the receiver while silenced");
+    sender.claimOwnership(); await flush(); await flush();
+    assert.equal(calls.at(-1)!.url, "http://matrix/emote/claim", "an explicit claim is an order, never ambient traffic");
+    assert.equal(headers(calls.at(-1)!.init).get("X-Emote-Session-Id"), "session-A", "the claim carries this session's identity");
+    sender.releaseOwnership(); await flush(); await flush();
+    assert.equal(calls.at(-1)!.url, "http://matrix/emote/release", "the explicit release is not swallowed by silence either");
+    assert.equal(calls.filter(call => call.init.body !== undefined && call.init.body !== null).length, 1, "only the pre-silence image carried a body");
+    assert.deepEqual(reports, [], "both controls are answered with the ownership marker, so nothing is warned");
+  } finally { sender.dispose(); }
+});
+
 test("receiver pending carrier is replaced by latest busy image; disposal aborts active requests", async t => {
   const advance = virtualTime(t), calls: RequestInit[] = []; const release: Array<() => void> = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Promise(resolve => release.push(() => resolve(new Response()))); });

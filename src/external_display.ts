@@ -195,13 +195,11 @@ export class ExternalDisplay {
         url.pathname = "/emote/heartbeat";
         this.heartbeatUrl = url.href;
         this.heartbeatTimer = setInterval(() => {
-          if (this.disposed || this.paused || !this.heartbeatUrl) return;
+          if (this.disposed || this.paused || !this.heartbeatUrl || this.isSilenced()) return;
           // Heartbeats also run before the first frame once the user explicitly
           // enabled this destination or it holds a reservation; a restored
           // preference keeps today's first-frame gate exactly as before.
           if (!this.hasFrame && !this.explicitOwner) return;
-          // The autonomous clock silences avatar frames, never this bodyless
-          // signal: the reservation expires after 30 s without it.
           this.heartbeatPending = true;
           if (!this.active) void this.drain();
         }, 5000);
@@ -409,13 +407,17 @@ export class ExternalDisplay {
 
   private async drain(): Promise<void> {
     const control = this.controls[0] ?? null;
+    // Silence stops ambient traffic so the receiver can run its own clock, which
+    // is why the documented 30 s reservation lapses while it lasts. An explicit
+    // claim or release is an order, not ambient traffic, so it still runs.
+    if (this.isSilenced()) {
+      this.pending = null;
+      this.heartbeatPending = false;
+      if (!control) return;
+    }
     if (!this.options || this.disposed || this.active) return;
     // Release may run while paused; every other delivery waits for an enabled destination.
     if (this.paused && control !== "release") return;
-    // The autonomous clock silences avatar frames only. The bodyless heartbeat
-    // keeps renewing this session's reservation while the receiver runs its own
-    // clock; dropping it would make the display ownerless after 30 s.
-    if (this.isSilenced()) this.pending = null;
     if (!control && !this.pending && !this.heartbeatPending) return;
     const image = control ? null : this.pending;
     const heartbeat = !control && !image;
