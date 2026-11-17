@@ -1,6 +1,6 @@
 # /emote displayOn with an optional display address
 Objective: let `/emote displayOn` accept an optional LAN address for the LED/ESP32 display, persist it globally, and keep the no-argument command byte-for-byte.
-Branches: feat/display-targets, created from main (both arguments touch the same files, so one reviewable branch serves them). Delivery: work-unit commits on the feature branch; no push/PR/merge. Runner: npm test (node:test), plus the editor's TypeScript checker (the package ships no tsconfig).
+Branches: feat/display-targets, created from main (both arguments touch the same files, so one reviewable branch serves them). Delivery: work-unit commits on the feature branch, then an authorized fast-forward of main and push (L6); no PR. Runner: npm test (node:test), plus the editor's TypeScript checker (the package ships no tsconfig).
 
 ## Specs
 S1. User: "vamos a mejorar el comando /emote displayOn para poderle pasar como opcional la ip del display"
@@ -12,11 +12,11 @@ S6. `/emote d200On <port>` accepts an optional TCP port for the Ulanzi D200 key 
 S7. Preserved behaviour for the D200 argument: the `d200` On preference stays global and persistent, the port never enters `config.json` or any other file, `/emote d200Off` still stops every D200 port, and bare `/emote d200On` behaves exactly as before.
 
 ## Tasks
-T1 | S1,S4 | parent inline | `src/display_address.ts` (address parsing/validation + global target persistence) with `tests/display_address.test.ts`, RED before GREEN
-T2 | S1,S2,S3,S4 | parent inline | `/emote displayOn <address>` in `src/index.ts`: validate, refuse without an enabled external display, persist globally, rebuild the session sender, claim, refresh the frame; help text and completions kept truthful
-T3 | S1,S2,S3,S6 | parent inline | README (global preferences, external display and D200 sections), CHANGELOG, AGENTS.md command table
-T4 | S1-S7 | parent inline | focused suites, full suite, typecheck, docs consistency, work-unit commits
-T5 | S6,S7 | parent inline | `src/d200_display.ts` (`parseD200Port`, `createD200Display({ port })`), `src/index.ts` (`d200Port` / `d200LivePort`), `tests/d200_display.test.ts`, `tests/integration.test.ts`, RED before GREEN
+T1 | S1,S4 | parent inline | done | `src/display_address.ts` parses a host token only and rewrites the user-global LED destination atomically, keeping loopback targets and unrelated keys; `tests/display_address.test.ts` covers the grammar, the missing/invalid messages, loopback refusal and the fail-closed write, RED before GREEN. Commit: ee6322a.
+T2 | S1,S2,S3,S4 | parent inline | done | `/emote displayOn <address>` validates, refuses without an enabled external display, persists, rebuilds the session sender, claims and refreshes the frame; `helpText` and the command description name the argument, bare `displayOn` unchanged. Commit: ee6322a.
+T3 | S1,S2,S3,S6 | parent inline | done | README (output table, global-preference exception, external-display and D200 sections), CHANGELOG Unreleased and the AGENTS.md command table document both arguments. Commit: 36be932.
+T4 | S1-S7 | parent inline | done | focused suites and full suite green; the package ships no tsconfig, so the TypeScript checker is the editor's; docs consistency re-read against the code. Evidence: npm test 430/430 at 9fdab9f and again at 9fdab9f after the review request. Commit: 9fdab9f.
+T5 | S6,S7 | parent inline | done | `src/d200_display.ts` gained `parseD200Port` and `createD200Display({ port })`; `src/index.ts` keeps `d200Port`/`d200LivePort` session-local and writes nothing; `tests/d200_display.test.ts` and `tests/integration.test.ts` cover default, explicit port, replacement and both refusal messages, RED before GREEN. Commit: ee6322a.
 
 ## Log
 L1. User request: "vamos a mejorar el comando /emote displayOn para poderle pasar como opcional la ip del display"
@@ -24,3 +24,4 @@ L2. Decisions quoted in S2-S4 asked before any source write; the current global 
 L3. Implementation choices (not additional user requirements): address grammar is a host token only (IPv4, bracketed IPv6 or DNS name, optional `:port`), normalized to `http://<address>/emote`; scheme, path, query, fragment, userinfo, whitespace and loopback addresses are rejected (loopback points at `/emote localOn`); the global write preserves every unrelated key, keeps loopback targets, replaces non-loopback ones, migrates a loopback legacy `url` into `targets`, and fails closed on an unreadable or non-object config; persistence is atomic (temporary file + rename) so a partial write cannot corrupt the user's config.
 L4. The D200 port requirement arrived after L1 in the same session, and its verbatim wording is not preserved in this document; S6 therefore records the implemented and tested contract instead of a quote. No product question stays open: the port is session-local because the D200 mirror is documented as independent of `config.json`, so the On preference is the only persisted piece.
 L5. Evidence: `npm test` 430/430. One authoring error of mine was fixed instead of loosening the contract: a reloaded sender starts empty, so the post-reload frame needs a real state transition — the test now emits `edit` rather than repeating `read`.
+L6. User request: "revisa la tarea que estaba en curso", then selected option B, "A + integrar: fast-forward de main a feat/display-targets y push". This closes the bookkeeping of T1-T5 in this document (state and commit per task) and replaces the earlier delivery line: main is fast-forwarded to the feature branch and published, without a pull request.
