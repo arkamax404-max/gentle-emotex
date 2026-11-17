@@ -752,7 +752,7 @@ test("all outputs default off; independent global switches survive project chang
     const emote = lab.commands.get("emote");
     assert.deepEqual(emote.getArgumentCompletions("display").map((item: any) => item.value), ["displayOn", "displayOff"]);
     await emote.handler("displayOn", lab.ctx); await flush();
-    assert.deepEqual(calls, ["http://matrix/emote"], "displayOn resumes latest frame only on ESP32");
+    assert.deepEqual(calls, ["http://matrix/emote/claim", "http://matrix/emote"], "displayOn claims the reservation before resuming the latest frame on ESP32");
     calls.length = 0;
     await emote.handler("localOn", lab.ctx); await flush();
     assert.deepEqual(calls, ["http://localhost:8000/emote"]);

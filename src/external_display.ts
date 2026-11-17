@@ -93,6 +93,28 @@ export class ExternalDisplays {
     return count;
   }
 
+  /** Explicit /emote displayOn: resume and claim each LED/ESP32 destination, even when already enabled. */
+  claimDisplays(): number {
+    let count = 0;
+    for (const display of this.displays) {
+      if (!display.enabled || display.local) continue;
+      display.claimOwnership();
+      count++;
+    }
+    return count;
+  }
+
+  /** Explicit /emote displayOff: cancel pending work and release each LED/ESP32 destination. */
+  releaseDisplays(): number {
+    let count = 0;
+    for (const display of this.displays) {
+      if (!display.enabled || display.local) continue;
+      display.releaseOwnership();
+      count++;
+    }
+    return count;
+  }
+
   select(image: SelectedImage): void { for (const display of this.displays) display.select(image); }
   updateActivity(activity: DisplayActivity): void { for (const display of this.displays) display.updateActivity(activity); }
   setContextUsage(percent: number | null): void { for (const display of this.displays) display.setContextUsage(percent); }
@@ -121,6 +143,14 @@ export class ExternalDisplay {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatPending = false;
   private hasFrame = false;
+  // Session ownership (fixed LED protocol): only the explicit /emote displayOn
+  // path claims through the same single-flight queue; restore never claims and
+  // legacy/409 answers stay warned non-claims, never an exclusivity report.
+  private controls: Array<"claim" | "release"> = [];
+  private explicitOwner = false;
+  private legacyWarned = false;
+  private conflictWarned = false;
+  private unclaimableWarned = false;
   private disposed = false;
   private paused = false;
   private active: AbortController | null = null;
@@ -165,7 +195,13 @@ export class ExternalDisplay {
         url.pathname = "/emote/heartbeat";
         this.heartbeatUrl = url.href;
         this.heartbeatTimer = setInterval(() => {
-          if (this.disposed || this.paused || !this.hasFrame || !this.heartbeatUrl || this.isSilenced()) return;
+          if (this.disposed || this.paused || !this.heartbeatUrl) return;
+          // Heartbeats also run before the first frame once the user explicitly
+          // enabled this destination or it holds a reservation; a restored
+          // preference keeps today's first-frame gate exactly as before.
+          if (!this.hasFrame && !this.explicitOwner) return;
+          // The autonomous clock silences avatar frames, never this bodyless
+          // signal: the reservation expires after 30 s without it.
           this.heartbeatPending = true;
           if (!this.active) void this.drain();
         }, 5000);
@@ -200,6 +236,64 @@ export class ExternalDisplay {
   }
 
   private warn(message: string) { try { this.report(message); } catch { /* sink diagnostics cannot break UI */ } }
+
+  /** Control routes exist only on non-loopback exact /emote destinations with session identity. */
+  private claimable(): boolean {
+    if (!this.options || this.sessionId === null || this.local) return false;
+    try {
+      const url = new URL(this.options.url);
+      return url.pathname === "/emote" && !url.search;
+    } catch { return false; }
+  }
+
+  /** Explicit /emote displayOn for this destination: claim the reservation through the shared queue, before any later image. */
+  claimOwnership(): void {
+    if (this.disposed || !this.options) return;
+    this.explicitOwner = true;
+    // Every explicit command enqueues its own claim: a queued claim never
+    // stands in for a later order, because only the sent request reserves.
+    if (this.claimable()) this.controls.push("claim");
+    else if (!this.unclaimableWarned) {
+      // No session identity or not the exact /emote route: this destination
+      // cannot hold a reservation, and reporting an enforced one would lie.
+      this.unclaimableWarned = true;
+      this.warn("externalDisplay: this destination cannot hold a session reservation without a session identity and the exact /emote route; delivering without exclusivity");
+    }
+    this.setPaused(false);
+    if (!this.paused && !this.active) void this.drain();
+  }
+
+  /** Explicit /emote displayOff for this destination: cancel pending work, abort the active request and release. */
+  releaseOwnership(): void {
+    if (this.disposed || !this.options) return;
+    this.setPaused(true);
+    this.pending = null;
+    this.heartbeatPending = false;
+    this.explicitOwner = false;
+    this.legacyWarned = false;
+    this.conflictWarned = false;
+    this.unclaimableWarned = false;
+    if (this.claimable()) this.controls = ["release"];
+    if (!this.active) void this.drain();
+  }
+
+  /** Ownership outcomes never throw and never auto-retry: legacy and 409 stay warned non-claims. */
+  private handleControl(control: "claim" | "release", response: Response): void {
+    if (control === "claim" && response.ok && response.headers.get("X-Emote-Ownership") === "1") return;
+    if (response.status === 409) {
+      if (!this.conflictWarned) {
+        this.conflictWarned = true;
+        this.warn(`externalDisplay: ${control} rejected with 409 (another session may own the display); delivering without exclusivity`);
+      }
+    } else if (control === "claim" && (response.ok || response.status === 404 || response.status === 405)) {
+      if (!this.legacyWarned) {
+        this.legacyWarned = true;
+        this.warn("externalDisplay: receiver does not support session ownership; delivering without a reservation");
+      }
+    } else if (!response.ok) {
+      this.deliveryDiagnostic("externalDisplay: receiver rejected control request");
+    }
+  }
 
   private deliveryDiagnostic(message: string): void {
     try { log(message); } catch { /* diagnostics must not affect delivery or UI */ }
@@ -314,20 +408,36 @@ export class ExternalDisplay {
   }
 
   private async drain(): Promise<void> {
-    if (this.isSilenced()) {
-      this.pending = null;
-      this.heartbeatPending = false;
-      return;
-    }
-    const image = this.pending;
-    if ((!image && !this.heartbeatPending) || !this.options || this.disposed || this.paused) return;
-    const heartbeat = !image;
-    this.pending = null;
+    const control = this.controls[0] ?? null;
+    if (!this.options || this.disposed || this.active) return;
+    // Release may run while paused; every other delivery waits for an enabled destination.
+    if (this.paused && control !== "release") return;
+    // The autonomous clock silences avatar frames only. The bodyless heartbeat
+    // keeps renewing this session's reservation while the receiver runs its own
+    // clock; dropping it would make the display ownerless after 30 s.
+    if (this.isSilenced()) this.pending = null;
+    if (!control && !this.pending && !this.heartbeatPending) return;
+    const image = control ? null : this.pending;
+    const heartbeat = !control && !image;
+    if (control) this.controls.shift();
+    if (image) this.pending = null;
     if (heartbeat) this.heartbeatPending = false;
     const controller = new AbortController();
     this.active = controller;
     this.timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
+      if (control) {
+        // Control routes are bodyless and session-scoped; the image sequence stays image-attempt-only.
+        const url = new URL(this.options.url);
+        url.pathname = `/emote/${control}`;
+        const response = await this.fetcher(url.href, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: { "X-Emote-Version": "1", "X-Emote-Session-Id": this.sessionId! },
+        });
+        // Do not retain or consume receiver content; release its connection/body.
+        await response.body?.cancel();
+        this.handleControl(control, response);
+      } else {
       let body: Buffer | undefined;
       const headers: Record<string, string> = { "X-Emote-Version": "1", "X-Emote-Stream-Id": this.streamId };
       if (this.sessionId) headers["X-Emote-Session-Id"] = this.sessionId;
@@ -365,18 +475,24 @@ export class ExternalDisplay {
       await response.body?.cancel();
       // Older PNG receivers may not implement lifecycle routes. Probe only once.
       if (heartbeat && response.status === 404) this.heartbeatUrl = null;
+      else if (response.status === 409 && !this.conflictWarned) {
+        this.conflictWarned = true;
+        this.warn("externalDisplay: receiver reports another session owns the display (409); delivering without exclusivity");
+      }
       else if (!response.ok) this.deliveryDiagnostic("externalDisplay: receiver rejected frame");
+      }
     } catch { if (!this.disposed) this.deliveryDiagnostic("externalDisplay: delivery failed or timed out"); }
     finally {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
       this.active = null;
-      if (!this.disposed && (this.pending || this.heartbeatPending)) void this.drain();
+      if (!this.disposed && (this.pending || this.heartbeatPending || this.controls.length > 0)) void this.drain();
     }
   }
 
   dispose(): void {
     this.disposed = true;
+    this.controls = [];
     if (this.clockTimer) clearInterval(this.clockTimer);
     this.clockTimer = null;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);

@@ -110,8 +110,8 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   localOff: "pause localhost delivery without affecting the ESP32",
   d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003",
   d200Off: "stop mirroring to the Ulanzi D200 key",
-  displayOn: "resume delivery to configured LED/ESP32 displays",
-  displayOff: "pause LED/ESP32 delivery without affecting localhost or D200",
+  displayOn: "resume LED/ESP32 delivery and claim the display for this session",
+  displayOff: "pause LED/ESP32 delivery and release this session's claim",
 };
 
 // Public command names are independent of the existing persisted output keys.
@@ -592,7 +592,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent; displayOn claims the LED display for this session, displayOff releases it)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
@@ -637,7 +637,11 @@ export default function (pi: ExtensionAPI) {
         }
       }
       if (name === "displayOn" || name === "displayOff") {
-        const count = externalDisplay?.setDisplayEnabled(name === "displayOn") ?? 0;
+        // Explicit commands claim and release the LED session reservation; the
+        // startup restore path below keeps using setDisplayEnabled and never claims.
+        const count = name === "displayOn"
+          ? externalDisplay?.claimDisplays() ?? 0
+          : externalDisplay?.releaseDisplays() ?? 0;
         if (!count) ctx.ui?.notify?.(`[${EXTENSION_NAME}] no enabled LED/ESP32 display configured; preference saved`, "info");
         return;
       }

@@ -775,7 +775,6 @@ test("setTitle re-captions the live selection without touching selection, stream
   try {
     sender.select(frame()); await tick();
     assert.equal(calls.length, 2);
-    const first = calls.at(-1)!;
     sender.setTitle("Título Nuevo");
     await tick();
     assert.equal(calls.length, 4, "both destinations resend the current frame with the new caption");
@@ -815,4 +814,267 @@ test("setTitle with the current value is a no-op and invalid titles never re-cap
     sender.select(frame("next.png")); await tick();
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Project-Name"), encodeURIComponent("base"), "delivery keeps the basename caption");
   } finally { sender.dispose(); }
+});
+
+const matrixOptions = { enabled: true, url: "http://matrix/emote", timeoutMs: 1000 };
+const ownershipResponse = () => new Response(null, { headers: { "X-Emote-Ownership": "1" } });
+
+test("explicit displayOn claims each eligible destination through the shared queue, before any later image even when already enabled", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  let matrixCalls = 0;
+  let release: (() => void) | undefined;
+  const sender = new ExternalDisplays(
+    { ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
+    async (url, init) => {
+      const target = String(url);
+      calls.push({ url: target, init: init! });
+      if (target === "http://matrix/emote") {
+        matrixCalls++;
+        if (matrixCalls === 1) return new Promise<Response>(resolve => { release = () => resolve(new Response()); });
+      }
+      return ownershipResponse();
+    },
+    () => {}, "session-A");
+  const matrix = () => calls.filter(call => call.url.startsWith("http://matrix/emote"));
+  try {
+    sender.select(frame()); await tick();
+    assert.equal(calls.length, 2, "both destinations deliver the selection");
+    sender.claimDisplays(); await tick();
+    assert.equal(matrix().length, 1, "the claim waits behind the active image request");
+    sender.select(frame("later.png")); await tick();
+    assert.equal(matrix().length, 1, "a new image also waits behind the queued claim");
+    release?.(); await tick(); await tick();
+    assert.equal(matrix()[1]!.url, "http://matrix/emote/claim");
+    const claimHeaders = new Headers(matrix()[1]!.init.headers);
+    assert.equal(calls[2]!.init.method, "POST");
+    assert.equal(matrix()[1]!.init.body, undefined, "control routes are bodyless");
+    assert.equal(claimHeaders.get("X-Emote-Session-Id"), "session-A");
+    assert.equal(claimHeaders.get("X-Emote-Version"), "1");
+    assert.equal(claimHeaders.get("X-Emote-Sequence"), null, "control routes never consume the image sequence");
+    assert.equal(matrix()[2]!.url, "http://matrix/emote", "the image queued after the claim follows it");
+    assert.equal(new Headers(matrix()[2]!.init.headers).get("X-Emote-Frame"), "later.png");
+    assert.ok(calls.every(call => !(call.url.startsWith("127.0.0.1") && call.url.includes("/claim"))), "loopback destinations never receive control routes");
+    sender.claimDisplays(); await tick(); await tick();
+    assert.equal(matrix().at(-1)!.url, "http://matrix/emote/claim", "a repeated explicit displayOn claims again while already enabled");
+  } finally { sender.dispose(); release?.(); }
+});
+
+test("displayOn with no selection claims and runs heartbeats before the first frame while explicitly enabled", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url) => { calls.push(String(url)); return ownershipResponse(); },
+    () => {}, "session-A");
+  try {
+    sender.claimDisplays(); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote/claim"], "displayOn claims even with no selection yet");
+    t.mock.timers.tick(5000); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote/heartbeat", "heartbeats run with no frame ever sent");
+    sender.updateActivity({ status: "busy", phase: "executing", activeSubagents: 1 });
+    t.mock.timers.tick(5000); await tick();
+    assert.equal(calls.filter(url => url.endsWith("/heartbeat")).length, 2, "heartbeats continue regardless of activity");
+    assert.equal(calls.filter(url => url.endsWith("/claim")).length, 1, "no automatic re-claim");
+  } finally { sender.dispose(); }
+});
+
+test("a new image after displayOn waits behind the in-flight claim in the shared single-flight queue", async () => {
+  const calls: string[] = [];
+  const done: Array<() => void> = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url) => {
+      calls.push(String(url));
+      return new Promise<Response>(resolve => done.push(() => resolve(ownershipResponse())));
+    },
+    () => {}, "session-A");
+  try {
+    sender.claimDisplays(); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote/claim"]);
+    sender.select(frame("later.png"));
+    await tick();
+    assert.deepEqual(calls, ["http://matrix/emote/claim"], "the image waits behind the claim");
+    done.shift()!(); await tick(); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote/claim", "http://matrix/emote"]);
+  } finally { sender.dispose(); for (const finish of done) finish(); }
+});
+
+test("restoring saved display preferences resumes delivery exactly as today without ever claiming or releasing", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url) => { calls.push(String(url)); return ownershipResponse(); },
+    () => {}, "session-A");
+  try {
+    sender.setDisplayEnabled(true);
+    sender.select(frame()); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote"], "a restore delivers like today without control routes");
+    sender.setDisplayEnabled(false); await tick();
+    sender.setDisplayEnabled(true); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote", "http://matrix/emote"], "an off/on restore cycle never claims or releases");
+    t.mock.timers.tick(5000); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote/heartbeat", "restored destinations keep today's first-frame heartbeat gate");
+  } finally { sender.dispose(); }
+});
+
+test("displayOff cancels pending frames, aborts the active request and releases; late completions cannot resume", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const signals: AbortSignal[] = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url, init) => {
+      const target = String(url);
+      calls.push(target); signals.push(init!.signal!);
+      if (calls.length === 1) return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(new Error("aborted"))));
+      return ownershipResponse();
+    },
+    () => {}, "session-A");
+  try {
+    sender.setDisplayEnabled(true);
+    sender.select(frame()); sender.select(frame("pending.png"));
+    await tick();
+    assert.equal(calls.length, 1, "one active plus one pending image");
+    sender.releaseDisplays(); await tick(); await tick();
+    assert.ok(signals[0]!.aborted, "displayOff aborts the active request");
+    assert.deepEqual(calls.slice(1), ["http://matrix/emote/release"], "pending frames are dropped and the release follows the abort");
+    sender.select(frame("after.png")); await tick();
+    t.mock.timers.tick(20000); await tick();
+    assert.deepEqual(calls, [calls[0]!, "http://matrix/emote/release"], "nothing is resumed after the release");
+    sender.dispose();
+    sender.claimDisplays(); sender.releaseDisplays();
+    await tick();
+    assert.deepEqual(calls, [calls[0]!, "http://matrix/emote/release"], "post-dispose commands are inert");
+  } finally { sender.dispose(); }
+});
+
+test("a claim without the ownership marker or rejected by the route warns once and keeps ordinary delivery without exclusivity", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const reports: string[] = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url) => { calls.push(String(url)); return new Response(null); },
+    message => reports.push(message), "session-A");
+  try {
+    sender.claimDisplays(); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote/claim");
+    assert.equal(reports.length, 1, "a 200 claim without X-Emote-Ownership: 1 warns once");
+    sender.claimDisplays(); await tick(); await tick();
+    assert.equal(reports.length, 1, "the legacy warning is not repeated within the ownership episode");
+    assert.equal(calls.filter(url => url === "http://matrix/emote/claim").length, 2, "claims only follow explicit commands");
+    sender.select(frame("legacy.png")); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote", "ordinary delivery continues");
+    t.mock.timers.tick(10000); await tick();
+    assert.ok(calls.some(url => url.endsWith("/heartbeat")), "heartbeats continue while explicitly enabled");
+    assert.equal(calls.filter(url => url.endsWith("/claim")).length, 2, "no automatic re-claim loop");
+  } finally { sender.dispose(); }
+  const calls404: string[] = [];
+  const reports404: string[] = [];
+  const legacy404 = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix2/emote" }] },
+    async (url) => { calls404.push(String(url)); return new Response(null, { status: 404 }); },
+    message => reports404.push(message), "session-A");
+  try {
+    legacy404.claimDisplays(); await tick();
+    assert.deepEqual(calls404, ["http://matrix2/emote/claim"], "404 claim reaches the route once");
+    assert.equal(reports404.length, 1, "404 claim reports legacy delivery");
+  } finally { legacy404.dispose(); }
+});
+
+test("409 from control routes is a warned non-success without automatic re-claim", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const reports: string[] = [];
+  const sender = new ExternalDisplays(
+    { ...options, targets: [{ ...options, url: "http://matrix/emote" }] },
+    async (url) => { calls.push(String(url)); return new Response(null, { status: 409 }); },
+    message => reports.push(message), "session-A");
+  try {
+    sender.claimDisplays(); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote/claim");
+    assert.equal(reports.length, 1, "the claim conflict is warned");
+    sender.select(frame("conflict.png")); await tick();
+    assert.equal(calls.at(-1), "http://matrix/emote", "ordinary image delivery continues after 409");
+    t.mock.timers.tick(5000); await tick();
+    t.mock.timers.tick(5000); await tick();
+    t.mock.timers.tick(5000); await tick();
+    assert.equal(calls.filter(url => url.endsWith("/heartbeat")).length, 3, "heartbeats continue and keep reporting the conflict");
+    assert.equal(reports.length, 1, "the conflict warning is issued once");
+    assert.equal(calls.filter(url => url.endsWith("/claim")).length, 1, "409 never triggers an automatic re-claim loop");
+  } finally { sender.dispose(); }
+});
+
+test("sessionless and non-protocol destinations never receive invented control routes", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  for (const [url, session] of [["http://matrix/emote", null], ["http://matrix/custom", "session-A"]] as const) {
+    const calls: string[] = [];
+    const sender = new ExternalDisplays(
+      { ...options, url },
+      async (target) => { calls.push(String(target)); return ownershipResponse(); },
+      () => {}, session);
+    try {
+      sender.claimDisplays(); await tick();
+      sender.releaseDisplays(); await tick(); await tick();
+      assert.deepEqual(calls, [], `no control traffic for ${url} without session identity on the exact /emote route`);
+      sender.setDisplayEnabled(true);
+      sender.select(frame()); await tick();
+      assert.deepEqual(calls, [url], "ordinary delivery continues");
+    } finally { sender.dispose(); }
+  }
+});
+
+test("dispose never sends claim or release control routes", async () => {
+  const calls: string[] = [];
+  const sender = new ExternalDisplay(
+    matrixOptions,
+    async (url) => { calls.push(String(url)); return ownershipResponse(); },
+    () => {}, "session-A");
+  sender.dispose();
+  sender.claimOwnership(); sender.releaseOwnership();
+  await tick();
+  assert.deepEqual(calls, []);
+});
+
+test("every explicit displayOn enqueues its own claim, even while one is still queued", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: string[] = [];
+  const sender = new ExternalDisplays(
+    { ...matrixOptions },
+    async (url) => { calls.push(String(url)); return ownershipResponse(); },
+    () => {}, "session-A");
+  try {
+    // Three explicit commands issued before any of them can be delivered: a
+    // queued claim never stands in for a later explicit command.
+    sender.claimDisplays();
+    sender.claimDisplays();
+    sender.claimDisplays();
+    await tick(); await tick(); await tick();
+    assert.deepEqual(calls, ["http://matrix/emote/claim", "http://matrix/emote/claim", "http://matrix/emote/claim"]);
+  } finally { sender.dispose(); }
+});
+
+test("an explicit displayOn that cannot claim warns once and keeps ordinary delivery without exclusivity", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  for (const [url, session] of [["http://matrix/emote", null], ["http://matrix/custom", "session-A"],
+                                ["http://matrix/emote?q=1", "session-A"]] as const) {
+    const calls: string[] = [];
+    const reports: string[] = [];
+    const sender = new ExternalDisplays(
+      { enabled: true, url, timeoutMs: 1000 },
+      async (target) => { calls.push(String(target)); return ownershipResponse(); },
+      (message: string) => reports.push(message), session);
+    try {
+      sender.claimDisplays(); sender.claimDisplays(); await tick(); await tick();
+      assert.deepEqual(calls, [], `no invented control routes for ${url}`);
+      assert.equal(reports.length, 1, `one honest warning for ${url}`);
+      assert.match(reports[0]!, /cannot (hold|reserve)|without exclusivity/i, reports[0]!);
+      assert.ok(!/reserved|claimed for this session/i.test(reports[0]!), `no false exclusivity claim for ${url}`);
+      sender.setDisplayEnabled(true);
+      sender.select(frame()); await tick();
+      assert.deepEqual(calls, [url], "ordinary delivery continues");
+    } finally { sender.dispose(); }
+  }
 });
