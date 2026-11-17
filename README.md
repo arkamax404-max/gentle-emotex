@@ -123,6 +123,9 @@ A source that is already configured keeps loading until it is updated or removed
 | `/emote <state>` | Previews one state for a few seconds (tab-completes), e.g. `/emote delegate` |
 | `/emote demo` | Plays the original scenes and all eight ODD work phases in sequence; previews do not publish a work phase or change agent activity |
 | `/emote status` | Read-only diagnostic: the last renderer-selected source PNG before any external idle-clock overlay (state, frame and set basename), the effective work phase and its source (native bus / direct tool / none), and the coarse activity snapshot (status, phase, active subagents). Works with every output off, changes nothing and never sends anything. ASCII-only rendering with no external destination does not select new PNGs; the reported PNG is the last captured selection, or none |
+| `/emote avatar <folder>` | Switches avatar immediately and saves the choice globally; tab completes available folders |
+| `/emote avatar auto` | Clears the manual choice and resumes current model/thinking-level mappings |
+| `/emote avatar` | Shows the current choice and usage without changing it |
 | `/emote idle` | Stops a preview and goes back to rest |
 | `/emote internalOff` | Hides the terminal avatar and frees its prompt space; external PNG delivery continues |
 | `/emote internalOn` | Shows the terminal avatar again without disabling external delivery |
@@ -135,6 +138,33 @@ A source that is already configured keeps loading until it is updated or removed
 | `/emote title <text>` | Sets the caption above the avatar on every external display for this project, saved in `.pi/extensions/gentle-emote/title.json`; bare `/emote title` restores the project folder basename |
 
 Any new prompt cancels a preview, so the avatar always follows the real agent.
+
+### Avatar selection
+
+Run `/emote avatar minecraft` (or another available folder) to switch without `/reload`.
+The choice is saved as a folder-name string in `<agent dir>/extensions/gentle-emote/avatar.json`,
+independently of `config.json` and output preferences. It survives restarts and project changes;
+already-running sessions restore it on their next start/reload. Manual selection wins over model
+and thinking-level changes until `/emote avatar auto` saves `null` and restores automatic mappings
+using the latest model/thinking-level events. Visibility, activity and output enablement are unchanged.
+
+Folders are resolved project → user → extension, deduplicated in completion. Put state folders
+such as `idle/idle.png` directly inside the named folder; nested wrappers are not searched.
+`auto` is reserved. Names must be a single basename: no separators, colon, exact `..` or `.`, or
+control characters; embedded dots (including `foo..bar`) are allowed. Manual selections and their YOLO
+twins require usable idle PNGs (or an ASCII idle scene). Automatic mappings may use partial YOLO twins
+with usable PNGs in other states, such as a read-only twin; the same path guards still apply.
+Unsafe, missing or unusable manual sets are rejected without changing the live avatar
+or preference; failed saves also retain the live choice. A malformed preference warns and uses
+automatic selection; a saved folder missing in another project warns and falls back automatically
+without overwriting the saved name.
+
+Selection, restoration, completion and YOLO twins validate real paths of the emotes root, set,
+configuration, state directories and PNGs before loading. Links escaping the allowed emotes tree
+are rejected; an unsafe higher-priority folder is not silently replaced by a lower layer.
+These synchronous checks do not lock files against concurrent filesystem replacement: use trusted,
+locally managed avatar directories. A PNG selection remains the external avatar even with the
+terminal hidden or using ASCII; a genuinely text-only set retains the existing graphical fallback.
 
 ### Project title
 
@@ -391,7 +421,8 @@ Put the folder in one of these places:
 - `<agent dir>/extensions/gentle-emote/emotes/my-avatar/`: for you, in every project.
 - `.pi/extensions/gentle-emote/emotes/my-avatar/`: only for that project, so you can commit it for your team.
 
-Then select it in your `config.json`:
+Select it immediately with `/emote avatar my-avatar`, then `/emote demo` to check it.
+Use `/emote avatar auto` to return to mappings. Alternatively configure automatic selection in `config.json`:
 
 ```json
 {

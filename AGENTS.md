@@ -15,6 +15,23 @@ All four output groups default to off independently; keep the extension's `enabl
 
 Each command persists its boolean globally under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`, independent of project configuration. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Saved choices survive project changes, restarts and reloads; running sessions restore changes from other sessions at their next start/reload. Commands affect their current session immediately. They never rewrite `config.json`; debug/display delivery still requires valid enabled configured destinations. Tests must use temporary agent directories, never the real user profile. Malformed preferences fail closed with a warning; failed saves leave the current output unchanged.
 
+## Persistent avatar selection
+
+`/emote avatar <folder>` immediately selects a direct child of an `emotes` directory;
+`/emote avatar` shows usage/current choice, and `/emote avatar auto` restores automatic
+model/thinking-level mappings using current event identity. Save globally as a name string
+or `null` at `<agent dir>/extensions/gentle-emote/avatar.json`, separate from config and outputs.
+Save before live mutation. Manual choices survive restart/project changes and model/thinking
+changes; missing saved sets warn and fall back without overwriting the preference.
+
+Use `src/avatar_selection.ts` for bounded manual selection, restoration, completion and YOLO
+twin validation, not the legacy fallback resolver. Project/user/extension precedence applies;
+only usable direct layouts are offered, with deduplicated deterministic full argument completions.
+Reject path syntax/control characters and realpath escapes through roots, sets, configuration,
+state directories or frames before loading. Checks do not lock against concurrent replacement.
+Tests use isolated temporary agent directories; never alter user avatar assets to normalize layouts.
+PNG selections must remain selected for external delivery when the terminal is hidden or ASCII.
+
 ## Configuration
 
 pi-emote uses layered configuration with deep merge. Higher-priority layers override lower ones field-by-field.

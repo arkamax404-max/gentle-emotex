@@ -8,7 +8,7 @@ import type { Config, EmoteState, ResolvedRenderer } from "./types.ts";
 import type { Renderer } from "./renderer.ts";
 import { log, setDebug } from "./log.ts";
 import { loadLayeredConfig } from "./config.ts";
-import { resolveEmoteSet, findEmoteSetDir, findYoloSetDir, loadEmotesConfig, EXTENSION_NAME } from "./emotes.ts";
+import { resolveEmoteSet, findEmoteSetDir, loadEmotesConfig, EXTENSION_NAME } from "./emotes.ts";
 import { bannerConfigCandidates, createAccentTransform, resolveAccent } from "./accent.ts";
 import type { Rgb } from "./accent.ts";
 import { KittyRenderer } from "./render_kitty.ts";
@@ -30,6 +30,8 @@ import { ODD_PHASE_CHANGE_EVENT, ODD_PHASE_CURRENT_EVENT, WORK_PHASES, WorkPhase
 import type { WorkPhase } from "./work_phase.ts";
 import { OutputStateStore, OUTPUTS } from "./output_state.ts";
 import { TitleStore, normalizeTitle } from "./title_state.ts";
+import { AvatarStateStore } from "./avatar_state.ts";
+import { avatarNames, findAvatar } from "./avatar_selection.ts";
 
 const WIDGET_KEY = "gentle-emote";
 const BANNER_POLL_MS = 2000;
@@ -99,6 +101,7 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   checking: "fills a checklist with green checks (host ODD phase)",
   closing: "presents the completed-work folder (host ODD phase)",
   demo: "plays the original scenes and all eight ODD work phases in a row",
+  avatar: "select a saved global avatar (/emote avatar <folder> | auto)",
   title: "set the display title above the avatar for this project (/emote title <text>; bare restores the folder name)",
   internalOn: "show the terminal avatar (external delivery stays active)",
   internalOff: "hide the terminal avatar (external delivery stays active)",
@@ -220,6 +223,12 @@ export default function (pi: ExtensionAPI) {
   let currentEmoteSet = "gentleman";
   let widgetActive = false;
   const outputState = new OutputStateStore();
+  const avatarState = new AvatarStateStore();
+  let manualAvatar: string | null = null;
+  let latestModel = "";
+  // Action methods are unavailable while the extension factory is loading.
+  // session_start initializes this before emote selection uses it.
+  let latestThinking = "";
   /** Per-project display title override; null shows the project folder basename. */
   let projectTitle: string | null = null;
 
@@ -301,9 +310,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   function loadEmoteSet(setName: string) {
+    // Explicit choices never use the legacy resolver's silent Gentleman fallback.
+    const baseDir = manualAvatar !== null ? findAvatar(setName, extDir, cwd) : findEmoteSetDir(setName, extDir, cwd);
+    if (!baseDir) return;
+    // Automatic twins may be partial; manual twins still require usable idle content.
+    // Both use the same path guards and first-existing-layer ownership.
+    const safeTwin = yoloOn ? findAvatar(`${setName}-yolo`, extDir, cwd,
+      manualAvatar === null ? "automatic-partial" : "manual") : null;
+    const setDir = safeTwin || baseDir;
     currentEmoteSet = setName;
-
-    const setDir = (yoloOn && findYoloSetDir(setName, extDir, cwd)) || findEmoteSetDir(setName, extDir, cwd);
     const isAsciiOnly = existsSync(join(setDir, "ascii.yaml")) && !hasImageFrames(setDir);
 
     if (!internalVisible) {
@@ -342,7 +357,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function switchEmoteSet(modelId: string, thinkingLevel: string) {
-    const setName = resolveEmoteSet(modelId, thinkingLevel, config.emotes);
+    const setName = manualAvatar ?? resolveEmoteSet(modelId, thinkingLevel, config.emotes);
     if (setName === currentEmoteSet) return;
     loadEmoteSet(setName);
     log(`switchEmoteSet: loaded "${setName}", state="${animator.currentState}"`);
@@ -564,15 +579,40 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent)",
-    getArgumentCompletions: (prefix: string) =>
-      [...EMOTE_STATES, "demo", "status", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])]
-        .filter((name) => name.startsWith(prefix.trim()))
-        .map((name) => ({ value: name, label: name, description: EMOTE_DESCRIPTIONS[name] })),
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On | d200Off | displayOn | displayOff (global, persistent)",
+    getArgumentCompletions: (prefix: string) => {
+      const choices = prefix.trimStart().startsWith("avatar ")
+        ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
+        : [...EMOTE_STATES, "demo", "status", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])];
+      return choices.filter(name => name.startsWith(prefix.trim()))
+        .map(name => ({ value: name, label: name, description: name.startsWith("avatar ") ? EMOTE_DESCRIPTIONS.avatar : EMOTE_DESCRIPTIONS[name] }));
+    },
     handler: async (args: string, ctx: any) => {
       const name = args.trim();
       if (!widgetActive) {
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar inactive (no UI or disabled)`, "warning");
+        return;
+      }
+      if (name === "avatar" || name.startsWith("avatar ")) {
+        const choice = name.slice("avatar".length).trim();
+        if (!choice) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar: ${manualAvatar ?? "auto"}; /emote avatar <folder> | auto`, "info");
+          return;
+        }
+        const next = choice === "auto" ? null : choice;
+        if (next !== null && !findAvatar(next, extDir, cwd)) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] invalid or unavailable avatar; avatar unchanged`, "warning");
+          return;
+        }
+        try { avatarState.save(next); }
+        catch {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global avatar; avatar unchanged`, "error");
+          return;
+        }
+        manualAvatar = next;
+        loadEmoteSet(next ?? resolveEmoteSet(latestModel, latestThinking, config.emotes));
+        refreshCurrentFrame();
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar: ${next ?? "auto"}`, "info");
         return;
       }
       const output = OUTPUTS.find(output => name === `${outputCommandName(output)}On` || name === `${outputCommandName(output)}Off`);
@@ -638,7 +678,7 @@ export default function (pi: ExtensionAPI) {
         previewState(name as EmoteState);
         return;
       }
-      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
     },
   });
 
@@ -694,7 +734,14 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`[${EXTENSION_NAME}] No image protocol detected \u2014 using ASCII emotes.`, "warning");
     }
 
-    const setName = resolveEmoteSet(ctx.model?.id ?? "", pi.getThinkingLevel(), config.emotes);
+    latestModel = ctx.model?.id ?? "";
+    latestThinking = pi.getThinkingLevel();
+    manualAvatar = avatarState.load(report);
+    if (manualAvatar !== null && !findAvatar(manualAvatar, extDir, cwd)) {
+      report("saved avatar unavailable; using automatic selection");
+      manualAvatar = null;
+    }
+    const setName = manualAvatar ?? resolveEmoteSet(latestModel, latestThinking, config.emotes);
     log(`session_start: set="${setName}" dir="${findEmoteSetDir(setName, extDir, cwd)}"`);
     unwatchYolo();
     loadEmoteSet(setName);
@@ -747,12 +794,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("model_select", async (event) => {
     if (!widgetActive) return;
-    switchEmoteSet(event.model?.id ?? "", pi.getThinkingLevel());
+    latestModel = event.model?.id ?? "";
+    latestThinking = pi.getThinkingLevel();
+    switchEmoteSet(latestModel, latestThinking);
   });
 
-  pi.on("thinking_level_select", async (event, ctx) => {
+  pi.on("thinking_level_select", async (event) => {
     if (!widgetActive) return;
-    switchEmoteSet(ctx.model?.id ?? "", event.level);
+    latestThinking = event.level;
+    switchEmoteSet(latestModel, latestThinking);
   });
 
   pi.on("input", async (event) => {
@@ -887,4 +937,5 @@ export default function (pi: ExtensionAPI) {
     displayActivity.reset();
     show("idle");
   });
+
 }

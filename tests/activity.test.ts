@@ -150,6 +150,16 @@ test("the Gentleman ships a YOLO twin set; sets without one have none", () => {
   assert.equal(findYoloSetDir("ascii", extDir, "/nonexistent"), null);
 });
 
+test("extension loading does not call runtime action methods", () => {
+  const pi = {
+    on() {},
+    registerCommand() {},
+    getThinkingLevel: () => { throw new Error("runtime not initialized"); },
+  };
+
+  assert.doesNotThrow(() => extension(pi as any));
+});
+
 test("the YOLO adapter is only read and observed, never toggled", async () => {
   delete process.env.TMUX;
   process.env.PI_CODING_AGENT_DIR = "/nonexistent/agent";

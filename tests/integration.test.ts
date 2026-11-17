@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { OutputStateStore, OUTPUTS } from "../src/output_state.ts";
-import { decodePng } from "../src/png.ts";
+import { decodePng, encodePng } from "../src/png.ts";
 
 const PLACEHOLDER = "\u{10EEEE}";
 const SESSION_ID = "integration-session";
@@ -95,6 +95,202 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
 }
 
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("avatar command persists globally, rejects paths without mutation, and auto uses latest identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-avatar-"));
+  const profile = join(root, "profile");
+  const configDir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ emotes: [
+    { model: "latest", "thinking-level": "low", "emote-set": "gentleman-yolo" },
+  ] }));
+  const path = join(profile, "extensions", "gentle-emote", "avatar.json");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const command = () => lab!.commands.get("emote");
+    const run = (args: string) => command().handler(args, lab!.ctx);
+    const status = async () => { await run("status"); return lab!.notices.at(-1)!.message; };
+    await run("read");
+    assert.match(await status(), /set=gentleman;/);
+    await run("avatar gentleled");
+    assert.equal(readFileSync(path, "utf8"), '"gentleled"\n');
+    assert.match(await status(), /set=gentleled;/);
+    assert.deepEqual(command().getArgumentCompletions("avatar gen").map((x: any) => x.value),
+      ["avatar gentleled", "avatar gentleman", "avatar gentleman-yolo"]);
+    assert.ok(command().getArgumentCompletions("avatar ").some((x: any) => x.value === "avatar auto"));
+    await run("avatar");
+    assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] avatar: gentleled; /emote avatar <folder> | auto", level: "info" });
+    const before = await status();
+    for (const invalid of ["../gentleman", "a/b", "a\\b", ".", "a..b", "C:foo", "missing-set", "a\u0001b"]) {
+      const writes = lab.writes.length;
+      await run(`avatar ${invalid}`);
+      assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] invalid or unavailable avatar; avatar unchanged", level: "warning" });
+      assert.equal(await status(), before);
+      assert.equal(lab.writes.length, writes);
+      assert.equal(readFileSync(path, "utf8"), '"gentleled"\n');
+    }
+    await lab.emit("model_select", { model: { id: "latest" } });
+    await lab.emit("thinking_level_select", { level: "low" });
+    assert.equal(await status(), before, "manual choice survives model and thinking events");
+    await run("internalOn"); await run("internalOff");
+    assert.match(await status(), /set=gentleled;/);
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    lab = await boot(join(root, "other-project"), [], profile);
+    await run("read");
+    assert.match(await status(), /set=gentleled;/, "restart in another project restores global choice");
+    lab.ctx.cwd = root;
+    await lab.emit("session_start");
+    await run("read");
+    await lab.emit("model_select", { model: { id: "latest" } });
+    await lab.emit("thinking_level_select", { level: "low" });
+    await run("avatar auto");
+    assert.equal(readFileSync(path, "utf8"), "null\n");
+    assert.match(await status(), /set=gentleman-yolo;/, "auto uses events, not stale command context");
+    writeFileSync(path, "{broken");
+    const automatic = await status();
+    await run("avatar gentleled");
+    assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] cannot save global avatar; avatar unchanged", level: "error" });
+    assert.equal(await status(), automatic);
+    assert.equal(readFileSync(path, "utf8"), "{broken");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    lab = await boot(root, [], profile);
+    assert.ok(lab.notices.some(x => x.message === "[gentle-emote] cannot read saved avatar; using automatic selection"));
+    assert.equal(readFileSync(path, "utf8"), "{broken");
+    writeFileSync(path, '"missing-set"');
+    await lab.emit("session_start");
+    assert.ok(lab.notices.some(x => x.message === "[gentle-emote] saved avatar unavailable; using automatic selection"));
+    assert.equal(readFileSync(path, "utf8"), '"missing-set"');
+  } finally { await lab?.shutdown(); lab?.restore(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("automatic YOLO accepts a guarded read-only twin without changing saved preferences", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-auto-yolo-"));
+  const profile = join(root, "profile");
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  const png = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) });
+  for (const [set, states] of [["custom", ["idle", "read"]], ["custom-yolo", ["read"]]] as const) {
+    for (const state of states) {
+      const stateDir = join(dir, "emotes", set, state);
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(join(stateDir, `${state}.png`), png);
+    }
+  }
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    emotes: [{ model: "*", "emote-set": "custom" }],
+    externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" },
+  }));
+  const previousFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, ["localOn"], profile);
+    let mode = false;
+    let refresh = () => {};
+    lab.busSent.find(x => x.channel === "gentle:yolo:host-ui")!.payload.respond({
+      read: async () => mode ? "ON" : "OFF",
+      observe: (next: () => void) => { refresh = next; return () => {}; },
+    });
+    await flush();
+    const emote = lab.commands.get("emote");
+    const preferences = join(profile, "extensions", "gentle-emote");
+    const savedDebug = readFileSync(join(preferences, "output-states", "debug.json"), "utf8");
+    assert.equal(savedDebug, "true\n");
+    const check = async (set: string) => {
+      await emote.handler("read", lab!.ctx); await flush();
+      assert.ok(calls.length > 0, "read preview delivers a PNG");
+      const headers = new Headers(calls.at(-1)!.headers);
+      assert.equal(headers.get("X-Emote-State"), "read");
+      assert.equal(headers.get("X-Emote-Set"), set);
+      assert.equal(headers.get("X-Emote-Frame"), "read.png");
+      await emote.handler("status", lab!.ctx);
+      assert.match(lab!.notices.at(-1)!.message, new RegExp(`PNG state=read frame=read\\.png set=${set};`));
+      assert.equal(readFileSync(join(preferences, "output-states", "debug.json"), "utf8"), savedDebug);
+      assert.equal(existsSync(join(preferences, "avatar.json")), false);
+    };
+    await check("custom"); // Prove OFF-mode fixture health before the compatibility check.
+    mode = true; refresh(); await flush();
+    await check("custom-yolo");
+    mode = false; refresh(); await flush();
+    await check("custom");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = previousFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual PNG avatar survives ASCII/hidden delivery and YOLO twins stay bounded", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "emote-avatar-ascii-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    terminals: [{ match: "ghostty", render: "ascii" }],
+    externalDisplay: { enabled: true, url: "http://localhost:8000/emote" },
+  }));
+  const previousFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, ["internalOn", "localOn"]);
+    let refresh = () => {};
+    let mode = false;
+    lab.busSent.find(x => x.channel === "gentle:yolo:host-ui")!.payload.respond({
+      read: async () => mode ? "ON" : "OFF",
+      observe: (next: () => void) => { refresh = next; return () => {}; },
+    });
+    const emote = lab.commands.get("emote");
+    await emote.handler("read", lab.ctx);
+    await emote.handler("avatar gentleled", lab.ctx); await flush();
+    const set = () => calls.map(call => new Headers(call.headers).get("X-Emote-Set")).filter(Boolean).at(-1);
+    assert.equal(set(), "gentleled");
+    await emote.handler("internalOff", lab.ctx); await flush();
+    assert.equal(set(), "gentleled");
+    // Existing preview and status semantics remain unchanged after manual selection.
+    await emote.handler("read", lab.ctx); await flush();
+    await emote.handler("status", lab.ctx);
+    assert.match(lab.notices.at(-1)!.message, /PNG state=read .*set=gentleled; phase none .*activity status=idle phase=idle activeSubagents=0/);
+    mode = true; refresh(); await flush();
+    assert.equal(set(), "gentleled");
+    await emote.handler("avatar gentleman", lab.ctx); await flush();
+    assert.equal(set(), "gentleman-yolo");
+    await emote.handler("avatar", lab.ctx);
+    assert.match(lab.notices.at(-1)!.message, /avatar: gentleman;/);
+    mode = false; refresh(); await flush();
+    assert.equal(set(), "gentleman");
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    mkdirSync(join(dir, "emotes"));
+    let linked = false;
+    try { symlinkSync(outside, join(dir, "emotes", "gentleman-yolo"), "junction"); linked = true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      t.diagnostic("junction permissions unavailable");
+    }
+    if (linked) {
+      const selected = calls.length;
+      await emote.handler("avatar gentleman-yolo", lab.ctx); await flush();
+      assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] invalid or unavailable avatar; avatar unchanged", level: "warning" });
+      assert.equal(calls.length, selected, "rejected escape delivers nothing");
+      assert.ok(!emote.getArgumentCompletions("avatar ").some((x: any) => x.value === "avatar gentleman-yolo"));
+      mode = true; refresh(); await flush();
+      assert.equal(set(), "gentleman", "unsafe YOLO twin falls back to validated base");
+      await emote.handler("avatar", lab.ctx);
+      assert.match(lab.notices.at(-1)!.message, /avatar: gentleman;/);
+      mode = false; refresh(); await flush();
+    }
+    await emote.handler("internalOn", lab.ctx); await flush();
+    lab.widgets.render(100);
+    assert.ok(lab.editor.render(100).join("\n").includes(".------."));
+    assert.equal(set(), "gentleman");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = previousFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("Gentle Shell child sessions never POST or register output commands even with saved On states", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
