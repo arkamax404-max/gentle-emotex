@@ -263,6 +263,31 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
   }
 }
 
+export interface SerialSystemDeps {
+  open: (path: string, baudRate: number) => Promise<SerialPortLike>;
+  list: () => Promise<SerialPortInfo[]>;
+}
+
+const REAL_SYSTEM_DEPS: SerialSystemDeps = {
+  open: (path, baudRate) => openSystemSerialPort(path, baudRate),
+  list: () => listSystemSerialPorts(),
+};
+
+let systemDeps: SerialSystemDeps = REAL_SYSTEM_DEPS;
+
+/**
+ * Replaces the OS openers for this process. Tests use it so they can never read
+ * or touch the machine's real ports; `null` restores the real ones.
+ */
+export function useSerialSystemDeps(next: Partial<SerialSystemDeps> | null): void {
+  systemDeps = next === null ? REAL_SYSTEM_DEPS : { ...systemDeps, ...next };
+}
+
+/** The openers the extension should use right now. */
+export function serialSystemDeps(): SerialSystemDeps {
+  return systemDeps;
+}
+
 /**
  * The real opener: `serialport` is optional and imported only here, so this
  * package installs and runs everywhere without a native module.

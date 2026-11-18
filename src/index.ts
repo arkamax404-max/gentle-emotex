@@ -26,7 +26,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
 import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
-import { createSerialDisplay, listSystemSerialPorts, openSystemSerialPort, type SerialDisplay } from "./serial_display.ts";
+import { createSerialDisplay, serialSystemDeps, type SerialDisplay } from "./serial_display.ts";
 import { parseSerialPortPath } from "./serial_protocol.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
@@ -326,8 +326,7 @@ export default function (pi: ExtensionAPI) {
       return true;
     }
     const link = createSerialDisplay({
-      open: openSystemSerialPort,
-      list: listSystemSerialPorts,
+      ...serialSystemDeps(),
       sessionId: sessionId(),
       projectName: typeof cwd === "string" ? basename(cwd) : null,
       report: message => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),

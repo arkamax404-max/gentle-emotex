@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { OutputStateStore, OUTPUTS } from "../src/output_state.ts";
 import { decodePng, encodePng } from "../src/png.ts";
+import { useSerialSystemDeps } from "../src/serial_display.ts";
 
 const PLACEHOLDER = "\u{10EEEE}";
 const SESSION_ID = "integration-session";
@@ -31,6 +32,8 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
     return true;
   };
 
+  // The usb output must never read or open this machine's real serial ports.
+  useSerialSystemDeps({ list: async () => [], open: async () => { throw new Error("no serial port in tests"); } });
   const handlers = new Map<string, Function[]>();
   const commands = new Map<string, any>();
   // A working pi.events bus so bus contracts (YOLO host UI, ODD work phase) can be exercised.
@@ -95,6 +98,7 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
   let shutDown = false;
   const panelDone = (value: unknown) => panelResolve?.(value);
   return { emit, emitBus, busSent, busHandlers, widgets, editor, writes, notices, shutdown, commands, ctx, customCalls, panelDone, restore: () => {
+    useSerialSystemDeps(null);
     (process.stdout as any).write = realWrite;
     if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = originalAgentDir;

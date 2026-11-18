@@ -41,7 +41,9 @@
   ],
   "pi": {
     "image": "./docs/avatar.png",
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -57,5 +59,8 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "optionalDependencies": {
+    "serialport": "^13.0.0"
   }
 }
