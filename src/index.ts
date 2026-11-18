@@ -26,6 +26,8 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
 import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
+import { createSerialDisplay, listSystemSerialPorts, openSystemSerialPort, type SerialDisplay } from "./serial_display.ts";
+import { parseSerialPortPath } from "./serial_protocol.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
@@ -204,6 +206,11 @@ export default function (pi: ExtensionAPI) {
   let d200Display: ExternalDisplay | null = null;
   /** Explicit `/emote d200On <port>` choice: session-local, cleared by every session start. */
   let d200Port: number | null = null;
+  /** USB serial output: one display at most, port session-local. */
+  let usbDisplay: SerialDisplay | null = null;
+  let usbPort: string | null = null;
+  let usbPending: { base64: string; state: string } | null = null;
+  let usbBusy = false;
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
@@ -291,10 +298,62 @@ export default function (pi: ExtensionAPI) {
       (display): display is ExternalDisplay => display?.enabled === true,
     );
     if (targets.length === 0 && renderer instanceof MirroredAsciiRenderer) return null;
+    const usb = usbDisplay;
     return (image: SelectedImage) => {
       lastSelected = { state: image.state, frame: image.frame, set: image.set };
       for (const display of targets) display.select(image);
+      if (usb) {
+        usbPending = { base64: image.base64, state: image.state };
+        pumpUsb();
+      }
     };
+  }
+
+  /** USB CDC output: at most one display, session-local port, nothing persisted on failure. */
+  async function setUsbDisplay(enabled: boolean, ctx: any, requestedPort?: string): Promise<boolean> {
+    if (!ownsSharedDisplays) return false;
+    if (!enabled) {
+      const current = usbDisplay;
+      usbDisplay = null;
+      usbPending = null;
+      if (current) void current.stop();
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display off`, "info");
+      return true;
+    }
+    if (requestedPort !== undefined) usbPort = requestedPort;
+    if (usbDisplay) {
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display already on: ${usbDisplay.path ?? "auto"}`, "info");
+      return true;
+    }
+    const link = createSerialDisplay({
+      open: openSystemSerialPort,
+      list: listSystemSerialPorts,
+      sessionId: sessionId(),
+      projectName: typeof cwd === "string" ? basename(cwd) : null,
+      report: message => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),
+    });
+    const started = await link.start(usbPort ?? undefined);
+    if (!started.ok) {
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${started.error}; usb serial display unchanged`, "warning");
+      return false;
+    }
+    usbDisplay = link;
+    usbPort = started.path;
+    void link.sendControl("claim");
+    ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
+    return true;
+  }
+
+  /** Bounded latest-frame delivery: one send in flight, intermediate frames dropped. */
+  function pumpUsb(): void {
+    if (!usbDisplay || usbBusy || !usbPending) return;
+    const image = usbPending;
+    usbPending = null;
+    usbBusy = true;
+    void usbDisplay.sendImage(image).finally(() => {
+      usbBusy = false;
+      pumpUsb();
+    });
   }
 
   /**
@@ -650,6 +709,7 @@ export default function (pi: ExtensionAPI) {
         { output: "local", enabled: stored.debug, destinations: counts.local },
         { output: "d200", enabled: d200Live, destinations: d200Live ? 1 : 0, detail: `port ${d200LivePort ?? resolveD200Port()}` },
         { output: "display", enabled: stored.display, destinations: counts.lan },
+        { output: "usb", enabled: usbDisplay !== null, destinations: usbDisplay ? 1 : 0, ...(usbPort ? { detail: usbPort } : {}) },
       ],
       clocks,
       appearance: {
@@ -899,6 +959,29 @@ export default function (pi: ExtensionAPI) {
         setD200Display(true, ctx, parsed.port);
         return;
       }
+      // `/emote usbOn [port]` is success-gated: a failed open never saves On.
+      if (name === "usbOn" || name.startsWith("usbOn ")) {
+        const requested = name.slice("usbOn".length).trim();
+        if (requested !== "") {
+          const invalid = parseSerialPortPath(requested);
+          if (invalid !== null) {
+            ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${invalid}; usb serial display unchanged`, "warning");
+            return;
+          }
+        }
+        const started = await setUsbDisplay(true, ctx, requested === "" ? undefined : requested);
+        if (started) {
+          try { outputState.save("usb", true); }
+          catch { ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global usb state; output unchanged`, "error"); }
+        }
+        return;
+      }
+      if (name === "usbOff") {
+        try { outputState.save("usb", false); }
+        catch { ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global usb state; output unchanged`, "error"); return; }
+        await setUsbDisplay(false, ctx);
+        return;
+      }
       const output = OUTPUTS.find(output => name === `${outputCommandName(output)}On` || name === `${outputCommandName(output)}Off`);
       if (output) {
         try { outputState.save(output, name === `${outputCommandName(output)}On`); }
@@ -972,7 +1055,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
@@ -1021,6 +1104,9 @@ export default function (pi: ExtensionAPI) {
     d200Port = null;
     d200LivePort = null;
     d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
+    usbDisplay = null;
+    usbPort = null;
+    if (ownsSharedDisplays && states.usb) void setUsbDisplay(true, ctx);
     applyProjectTitle();
     refreshContextUsage(ctx);
     displayActivity.reset();
@@ -1082,6 +1168,9 @@ export default function (pi: ExtensionAPI) {
     externalDisplay = null;
     d200Display?.dispose();
     d200Display = null;
+    void usbDisplay?.stop();
+    usbDisplay = null;
+    usbPending = null;
     unwatchBanner();
     stopTerminalInput?.();
     stopTerminalInput = null;

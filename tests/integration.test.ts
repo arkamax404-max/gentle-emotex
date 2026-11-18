@@ -332,7 +332,7 @@ test("Gentle Shell child sessions never POST or register output commands even wi
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(calls, 0, "animation cannot bypass the child-session restriction");
     assert.deepEqual(saved.load(message => assert.fail(message)), {
-      internal: true, debug: true, d200: true, display: true,
+      internal: true, debug: true, d200: true, display: true, usb: true,
     }, "the child guard does not discard global output preferences");
     lab.widgets.render(100);
     assert.equal(lab.writes.length, 0, "child sessions do not render a local terminal avatar");
@@ -1526,11 +1526,26 @@ test("a panel clock switch is session-local and visible in the status line", asy
     const keybindings = { matches: (data: string, action: string) => action === "tui.select.cancel" && data === cancel };
     const component = lab.customCalls[0]!.factory({ requestRender() {} }, { fg: (_role: string, text: string) => text }, keybindings, lab.panelDone);
     // The panel is drawn before any input, which seats the cursor on the first
-    // actionable row; from there four steps reach the first clock destination.
+    // actionable row. Navigation is by target row, never by counting, so adding
+    // an output cannot silently retarget this test.
     component.render(120);
-    for (let step = 0; step < 4; step++) component.handleInput(down);
-    const selected = component.render(120).find((row: string) => row.includes("> "));
-    assert.ok(selected?.includes("local"), `the cursor reaches the clock destination: ${selected}`);
+    const selectRow = (needle: string) => {
+      for (let step = 0; step < 24; step++) {
+        component.handleInput(down);
+        const row = component.render(120).find((line: string) => line.includes("> "));
+        if (row?.includes(needle)) return row;
+      }
+      return undefined;
+    };
+    // The needle comes from the panel itself: the row right after the CLOCK
+    // header is the destination the section reports.
+    const header = component.render(120);
+    const clockAt = header.findIndex((line: string) => line.includes("CLOCK"));
+    assert.ok(clockAt >= 0 && header[clockAt + 1] !== undefined, `the panel lists a clock destination: ${JSON.stringify(header)}`);
+    const clockRow = header[clockAt + 1]!;
+    const needle = clockRow.includes("not-settled") ? "not-settled" : clockRow.includes("active") ? "active" : "remaining";
+    const selected = selectRow(needle);
+    assert.ok(selected, `the cursor reaches the clock destination (${needle})`);
     component.handleInput(enter);
     await flush();
     await emote.handler("status", lab.ctx);
@@ -1566,10 +1581,19 @@ test("a panel appearance switch persists globally through the guarded writer", a
     const keybindings = { matches: (data: string, action: string) => action === "tui.select.cancel" && data === cancel };
     const component = lab.customCalls[0]!.factory({ requestRender() {} }, { fg: (_role: string, text: string) => text }, keybindings, lab.panelDone);
     component.render(120);
-    // Four output rows, then size, placement and frame.
-    for (let step = 0; step < 6; step++) component.handleInput(down);
-    const selected = component.render(120).find((row: string) => row.includes("> "));
-    assert.ok(selected?.includes("frame on"), `the cursor reaches the frame switch: ${selected}`);
+    component.render(120);
+    // Navigation is by target row, not by counting: adding an output must never
+    // silently retarget these tests.
+    const selectRow = (needle: string) => {
+      for (let step = 0; step < 24; step++) {
+        component.handleInput(down);
+        const row = component.render(120).find((line: string) => line.includes("> "));
+        if (row?.includes(needle)) return row;
+      }
+      return undefined;
+    };
+    const selected = selectRow("frame on");
+    assert.ok(selected, "the cursor reaches the frame switch");
     component.handleInput(enter);
     await flush();
     const written = JSON.parse(readFileSync(configFile, "utf8"));
@@ -1588,6 +1612,40 @@ test("a panel appearance switch persists globally through the guarded writer", a
     await lab?.shutdown();
     lab?.restore();
     globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOn fails closed without a serial module or a valid port, and never saves On", async () => {
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-"));
+  const profile = join(root, "profile");
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "usb.json");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const emote = lab.commands.get("emote");
+
+    await emote.handler("usbOn", lab.ctx);
+    await flush();
+    assert.equal(lab.notices.at(-1)?.level, "warning", "a missing display is a warning, never a crash");
+    assert.match(lab.notices.at(-1)?.message ?? "", /no usb serial display found/);
+    assert.equal(existsSync(savedState), false, "a failed open never persists On");
+
+    for (const invalid of ["usbOn C:\COM5", "usbOn /dev/sda1", "usbOn COM5/extra"]) {
+      await emote.handler(invalid, lab.ctx);
+      await flush();
+      assert.equal(lab.notices.at(-1)?.level, "warning", invalid);
+      assert.match(lab.notices.at(-1)?.message ?? "", /invalid serial port/, invalid);
+    }
+    assert.equal(existsSync(savedState), false, "a refused port never persists anything");
+
+    await emote.handler("usbOff", lab.ctx);
+    await flush();
+    assert.equal(new OutputStateStore(profile).load(() => {}).usb, false, "usbOff saves the off preference");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
     rmSync(root, { recursive: true, force: true });
   }
 });

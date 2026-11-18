@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { agentDir, EXTENSION_NAME } from "./emotes.ts";
 
-export const OUTPUTS = ["internal", "debug", "d200", "display"] as const;
+export const OUTPUTS = ["internal", "debug", "d200", "display", "usb"] as const;
 export type Output = typeof OUTPUTS[number];
 export type OutputStates = Record<Output, boolean>;
 
@@ -30,7 +30,7 @@ export class OutputStateStore {
   }
 
   load(report: (message: string) => void): OutputStates {
-    const states = { internal: false, debug: false, d200: false, display: false };
+    const states = { internal: false, debug: false, d200: false, display: false, usb: false };
     for (const output of OUTPUTS) {
       try { states[output] = this.read(output); }
       catch { report(`cannot read saved ${output} state; output stays off`); }

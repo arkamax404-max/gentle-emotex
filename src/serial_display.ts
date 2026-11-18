@@ -71,7 +71,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
   const heartbeatMs = deps.heartbeatMs ?? SERIAL_HEARTBEAT_MS;
   let port: SerialPortLike | null = null;
   let openPath: string | null = null;
-  let buffer = Buffer.alloc(0);
+  let buffer: Buffer = Buffer.alloc(0);
   let waiter: Waiter | null = null;
   let requestId = 0;
   let chain: Promise<unknown> = Promise.resolve();

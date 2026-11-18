@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OutputStateStore } from "../src/output_state.ts";
 
-const OFF = { internal: false, debug: false, d200: false, display: false };
+const OFF = { internal: false, debug: false, d200: false, display: false, usb: false };
 
 test("global output preferences default off and preserve each independent saved boolean", () => {
   const root = mkdtempSync(join(tmpdir(), "emote-output-state-"));
@@ -20,7 +20,7 @@ test("global output preferences default off and preserve each independent saved 
     second.save("d200", true);
     first.save("display", false);
     assert.deepEqual(new OutputStateStore(root).load(message => warnings.push(message)), {
-      internal: true, debug: true, d200: true, display: false,
+      internal: true, debug: true, d200: true, display: false, usb: false,
     });
     assert.deepEqual(warnings, []);
     const dir = join(root, "extensions", "gentle-emote", "output-states");

@@ -9,7 +9,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
  * counts and deadlines, never where the frames actually go.
  */
 
-export const PANEL_OUTPUTS = ["internal", "local", "d200", "display"] as const;
+export const PANEL_OUTPUTS = ["internal", "local", "d200", "display", "usb"] as const;
 export type PanelOutput = (typeof PANEL_OUTPUTS)[number];
 
 export const PANEL_CLOCK_MODES = ["off", "receiver", "silence"] as const;
@@ -77,6 +77,7 @@ const OUTPUT_LABELS: Record<PanelOutput, string> = {
   local: "local simulators / desktop",
   d200: "d200 key",
   display: "led / esp32",
+  usb: "usb serial",
 };
 
 /** `off` → `receiver` → `silence` → `off`; an unknown value falls back to `off`. */
