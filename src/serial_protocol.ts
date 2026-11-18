@@ -15,6 +15,8 @@ export const SERIAL_EXIT_ACK = "EMOTE_EXIT\n";
 export const SERIAL_MAGIC = "EMTS";
 export const SERIAL_REPLY_MAGIC = "EMTR";
 export const SERIAL_PROTOCOL_VERSION = 1;
+/** The firmware runs its console and ingress at 115200 8N1. */
+export const SERIAL_BAUD_RATE = 115_200;
 
 export const MAX_PNG_BYTES = 32_768;
 export const MAX_NAME_BYTES = 1_152;
