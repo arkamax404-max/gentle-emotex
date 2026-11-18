@@ -129,6 +129,7 @@ A source that is already configured keeps loading until it is updated or removed
 | `/emote avatar` | Shows the current choice and usage without changing it |
 | `/emote idle` | Stops a preview and goes back to rest |
 | `/emote internalOff` | Hides the terminal avatar and frees its prompt space; external PNG delivery continues |
+| `/emote usbOn [port]` / `usbOff` | Sends to the LED panel over USB CDC: bare `usbOn` auto-detects the single serial display, `usbOn COM5` names it for this session; `usbOff` leaves the binary session and closes the port. Persists only a successful On |
 | `/emote internalOn` | Shows the terminal avatar again without disabling external delivery |
 | `/emote localOff` | Pauses POSTs to configured localhost simulators; ESP32 delivery continues |
 | `/emote localOn` | Resumes localhost delivery immediately with the latest PNG and activity |
@@ -303,6 +304,14 @@ Sections: **OUTPUTS** (terminal avatar, local simulators/desktop, D200 with its 
 Keyboard: arrows or `j`/`k` move, Enter or Space applies, Escape or `q` closes. The panel rebuilds every row from live state on each draw and once per second; it sends nothing, renders no destination, route or credential, and a panel failure never reaches the avatar, delivery or the prompt.
 
 Every output switch goes through the same command entry point as typing it, so persistence, LED ownership claims and failure paths are identical. The **CLOCK** mode is session-local: switching a destination applies live, writes nothing, and returns to the configured mode on `/reload`. **`size`, `placement`, `frame` and `accent` are global**: the panel validates the new value and writes it atomically to the user-global config of the agent directory the session runs on, preserving every unrelated key, then applies it live — a failed write leaves both the file and the running appearance untouched. LED layout keys (`outline`, `background`, `backgroundCoverage`) and the D200 key are deliberately not editable: the panel layout cannot be altered and the key only mirrors the avatar.
+
+### USB serial output
+
+`/emote usbOn` drives the LED panel over USB CDC instead of HTTP, using the firmware's documented **wire protocol v1** (`docs/serial-transport.md` in the firmware repository): `EMOTE`/`EMOTE_READY` enters the binary session, 18-byte `EMTS` frames carry one operation with a reflected CRC-32 and a raw PNG payload, 12-byte `EMTR` replies are matched by request id while scanning past interleaved console lines, and `EMTE`/`EMOTE_EXIT` leaves cleanly. Delivery is stop-and-wait —one frame in flight, the whole frame resent once on a NACK or a missing reply— so a frame can never overtake another; intermediate animation frames are dropped and only the newest is sent.
+
+Bare `usbOn` succeeds only when exactly one serial port is visible; with none or several it refuses and asks for the port, because the owner confirmed a single USB display at most. `usbOn COM5` fixes the port for the session and writes nothing, like the D200 port. The output is **success-gated**: a failed open or a refused port name warns and persists nothing, so a machine without the serial module never keeps an On preference it cannot honour.
+
+`serialport` is an optional dependency, imported only when this output starts. Without it the command warns (`the optional serialport package is not installed`), every other output keeps working, and the rest of the package needs no native module.
 
 ### Receiver-owned idle clocks after five minutes
 
