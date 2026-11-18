@@ -209,6 +209,8 @@ export default function (pi: ExtensionAPI) {
   let usbDisplay: SerialDisplay | null = null;
   let usbPort: string | null = null;
   let usbPending: { base64: string; state: string } | null = null;
+  /** Last image the renderer selected, so a late usb start can push it at once. */
+  let lastFrameImage: SelectedImage | null = null;
   let usbBusy = false;
   /** Where to report a rejected serial frame, and the last error already shown. */
   let usbCtx: any = null;
@@ -307,24 +309,8 @@ export default function (pi: ExtensionAPI) {
     return (image: SelectedImage) => {
       lastSelected = { state: image.state, frame: image.frame, set: image.set };
       for (const display of targets) display.select(image);
-      if (usbDisplay) {
-        // The firmware validates the PNG envelope (64x64 RGBA8), exactly like the
-        // HTTP path, so the composed image is sent there too; the raw sprite is
-        // 48x40 and would be rejected with `png`.
-        try {
-          const composed = prepareDisplayImage(
-            image.base64,
-            { ...displayActivity.snapshot(), state: image.state },
-            config.externalDisplay.background,
-            config.externalDisplay.backgroundCoverage,
-            undefined,
-            config.externalDisplay.transparentBackground,
-            null,
-          );
-          usbPending = { base64: composed.toString("base64"), state: image.state };
-          pumpUsb();
-        } catch { /* a failed composition never blocks the other outputs */ }
-      }
+      lastFrameImage = image;
+      queueUsbFrame(image);
     };
   }
 
@@ -366,8 +352,34 @@ export default function (pi: ExtensionAPI) {
     // must deliver with every HTTP output off. When no HTTP target existed at
     // session start the renderer kept no sink at all, so it is registered here.
     renderer.setFrameSink?.(frameSink());
+    // A quiet idle state may never select a new frame, so the last known image is
+    // pushed here instead of waiting for the animator.
+    if (lastFrameImage) queueUsbFrame(lastFrameImage);
     refreshCurrentFrame();
     return true;
+  }
+
+  /**
+   * Queues the composed 64x64 image for the serial link. The firmware validates
+   * the PNG envelope just like the HTTP path, and the raw sprite is 48x40, so the
+   * composed bytes are what travels; a composition failure never blocks the
+   * other outputs.
+   */
+  function queueUsbFrame(image: SelectedImage): void {
+    if (!usbDisplay) return;
+    try {
+      const composed = prepareDisplayImage(
+        image.base64,
+        { ...displayActivity.snapshot(), state: image.state },
+        config.externalDisplay.background,
+        config.externalDisplay.backgroundCoverage,
+        undefined,
+        config.externalDisplay.transparentBackground,
+        null,
+      );
+      usbPending = { base64: composed.toString("base64"), state: image.state };
+      pumpUsb();
+    } catch { /* compose failures are never fatal */ }
   }
 
   /** Bounded latest-frame delivery: one send in flight, intermediate frames dropped. */
