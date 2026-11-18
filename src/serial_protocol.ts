@@ -147,3 +147,20 @@ export function parseSerialReplies(buffer: Buffer): { replies: SerialReply[]; re
   }
   return { replies, rest: buffer.subarray(offset) };
 }
+const PORT_PATTERNS = [
+  /^COM[1-9][0-9]?$/i,
+  /^\/dev\/tty(ACM|USB)[0-9]+$/,
+  /^\/dev\/cu\.(usbmodem|usbserial)[0-9]+$/,
+];
+
+/**
+ * Validates an explicit port name. A path, a URL or anything else is refused
+ * instead of being handed to the OS, so `/emote usbOn` can never open something
+ * that is not a serial device. Returns an error message, or null when valid.
+ */
+export function parseSerialPortPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return "missing serial port";
+  if (PORT_PATTERNS.some(pattern => pattern.test(trimmed))) return null;
+  return "invalid serial port";
+}

@@ -10,6 +10,7 @@ import {
   SERIAL_EXIT_ACK,
   SERIAL_PROTOCOL_VERSION,
   buildSerialFrame,
+  parseSerialPortPath,
   parseSerialReplies,
   serialResultName,
 } from "../src/serial_protocol.ts";
@@ -103,4 +104,12 @@ test("result codes map to the documented names", () => {
   const names = ["ok", "crc", "version", "op", "flags", "reserved", "length", "oversize", "session", "name", "png", "busy"];
   names.forEach((name, code) => assert.equal(serialResultName(code), name));
   assert.equal(serialResultName(99), "unknown");
+});
+test("an explicit port must look like a serial device", () => {
+  for (const valid of ["COM5", "com12", "/dev/ttyACM0", "/dev/ttyUSB3", "/dev/cu.usbmodem1101"]) {
+    assert.equal(parseSerialPortPath(valid), null, valid);
+  }
+  for (const invalid of ["", "   ", "ttyACM0", "/dev/sda1", "COM0", "COM", "C:\COM5", "http://host/COM5", "COM5/extra", "../COM5"]) {
+    assert.notEqual(parseSerialPortPath(invalid), null, JSON.stringify(invalid));
+  }
 });
