@@ -311,7 +311,11 @@ Every output switch goes through the same command entry point as typing it, so p
 
 Bare `usbOn` succeeds only when exactly one serial port is visible; with none or several it refuses and asks for the port, because the owner confirmed a single USB display at most. `usbOn COM5` fixes the port for the session and writes nothing, like the D200 port. The output is **success-gated**: a failed open or a refused port name warns and persists nothing, so a machine without the serial module never keeps an On preference it cannot honour.
 
+The USB PNG uses the **same LED layout as `displayOn`**: the group outline (white `#ffffff` by default, or the configured `externalDisplay.outline` color — the USB board is always a physical LED target, so it always receives a silhouette), the same `background`/`backgroundCoverage`/`transparentBackground` group options, and the same compact captioned layout with the effective project title: a saved `/emote title` override or the folder basename, omitted safely when invalid. The caption ink follows the session's context band like the LED destinations (pure green by default, yellow from 60%, red above 80%). `/emote title` recomposes the current USB frame immediately, including the bare reset back to the folder name; per-target `targets:` overrides stay HTTP-specific and USB always uses the group options. The USB composition carries no per-destination phase-elapsed clock, and it does follow the group's idle-clock handoff: when `externalDisplay.idleClock` is omitted, USB enters **receiver** mode by default — after more than five uninterrupted settled idle minutes the panel receives exactly one clock-tagged carrier composed from the current avatar and its live validated title (the protocol's existing clock flag, no clock artwork is generated here), ordinary frames stay suppressed while it lasts, and the latest ordinary frame resumes immediately on real activity. The link's 5 s heartbeats keep running during receiver ambient, exactly like an HTTP receiver. An explicit `"off"` disables the handoff and keeps ordinary delivery; an explicit `"receiver"` behaves like the default; `"silence"` stops both ordinary frames and the link's own heartbeats while ambient, like the HTTP silence mode. Any other value reads as `"off"` on USB. `usbOff`, a session start and shutdown clear the clock truth; a restarted link always begins a fresh five-minute deadline.
+
 `serialport` is an optional dependency, imported only when this output starts. Without it the command warns (`the optional serialport package is not installed`), every other output keeps working, and the rest of the package needs no native module.
+
+**Diagnostics.** Failures are reported once per distinct cause as warnings, and clear when a frame is accepted again: `usb image composition failed: <cause>` when the 64×64 frame cannot be composed (delivery to the other outputs is unaffected), `usb frame rejected: <result>` when the firmware refuses a frame, `usb frame send failed: <cause>` when the frame cannot be written to the port, and `usb claim rejected: <result>` / `usb claim send failed: <cause>` when the session's claim is refused or undeliverable. The first accepted frame is confirmed with an informational `usb frame accepted (<n> b64 chars)`.
 
 ### Receiver-owned idle clocks after five minutes
 
@@ -319,9 +323,11 @@ Bare `usbOn` succeeds only when exactly one serial port is visible; with none or
 
 | Mode | After more than five uninterrupted idle minutes |
 |------|-----------------------------------------------|
-| `"off"` (default, including omitted) | Ordinary avatar delivery and session heartbeats continue; no clock handoff |
+| `"off"` (default, including omitted — HTTP destinations) | Ordinary avatar delivery and session heartbeats continue; no clock handoff |
 | `"receiver"` | Send one existing prepared avatar PNG tagged state `clock`, frame `clock.png`, set `idle-clock`; the desktop utility draws its own clock. Existing session heartbeats continue without periodic PNGs |
 | `"silence"` | Stop both PNGs and heartbeats, clearing pending traffic; the LED receiver enters its autonomous fallback after another **10 seconds** without traffic |
+
+The USB serial output reads the same group mode with one approved difference: omitted there defaults to `"receiver"` (see [USB serial output](#usb-serial-output)).
 
 ```json
 {
@@ -336,7 +342,7 @@ Bare `usbOn` succeeds only when exactly one serial port is visible; with none or
 }
 ```
 
-The optional field accepts only the exact strings `"off"`, `"receiver"` and `"silence"`; other values (including `null`, booleans and differently cased strings) disable the affected destination with a configuration warning. Targets inherit the parent mode unless overridden; normal field-by-field config layering applies, while `targets` arrays are replaced as a whole. No mode is inferred from loopback/LAN addressing. Nothing enables paused/off outputs, changes saved preferences or replaces the terminal avatar.
+The optional field accepts only the exact strings `"off"`, `"receiver"` and `"silence"`; other values (including `null`, booleans and differently cased strings) disable the affected destination with a configuration warning — on USB they simply read as `"off"` for the handoff, delivery unchanged. Targets inherit the parent mode unless overridden; normal field-by-field config layering applies, while `targets` arrays are replaced as a whole. No mode is inferred from loopback/LAN addressing. Nothing enables paused/off outputs, changes saved preferences or replaces the terminal avatar.
 
 The coarse phase must stay `idle` with no active subagent, and a **settled error counts as idle**: after a turn whose last tool failed, the host keeps reporting status `error` with phase `idle`, and every destination already labels that combination `IDLE` (in red), so it starts the clock instead of blocking it for the rest of the session. Busy activity, a non-idle phase, a published work phase, active subagents or an explicit non-idle frame preview cancels the deadline. The `idle` and `grandma` states share one continuous idle budget: switching between them does not restart it. Grandma's separate timer and its untimed phase row without subagents are unchanged. Eligibility uses monotonic time and is strictly **more than** five minutes; reload/recreation starts a fresh deadline.
 

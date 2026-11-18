@@ -172,6 +172,26 @@ test("stop-and-wait: never two frames in flight", async () => {
   await link.stop();
 });
 
+test("setQuiet suppresses only the link's own heartbeats", async () => {
+  const peer = fakePort();
+  const link = transport(peer.port, { heartbeatMs: 5 });
+  await link.start();
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const before = peer.frames.length;
+  assert.ok(before > 0, "heartbeats flow while the link is loud");
+  link.setQuiet(true);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(peer.frames.length, before, "no heartbeat frame travels while quiet");
+  assert.deepEqual(await link.sendImage(image), { ok: true, result: "ok" }, "images still send while quiet");
+  assert.equal(peer.frames.length, before + 1);
+  assert.deepEqual(await link.sendControl("heartbeat"), { ok: true, result: "ok" }, "explicit controls still send while quiet");
+  assert.equal(peer.frames.length, before + 2);
+  link.setQuiet(false);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.ok(peer.frames.length > before + 2, "heartbeats resume when the link is loud again");
+  await link.stop();
+});
+
 test("console noise around replies is tolerated", async () => {
   const peer = fakePort();
   const link = transport(peer.port);

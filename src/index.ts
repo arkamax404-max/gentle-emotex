@@ -28,13 +28,15 @@ import { writePanelConfig } from "./config_write.ts";
 import { createSerialDisplay, serialSystemDeps, type SerialDisplay } from "./serial_display.ts";
 import { parseSerialPortPath } from "./serial_protocol.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
+import { prepareDisplayImage } from "./display_image.ts";
+import { IdleClock, IDLE_CLOCK_TICK_MS } from "./idle_clock.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
 import { SubagentTaskTracker } from "./subagent_activity.ts";
 import { WORK_PHASES, WorkPhaseTracker, isWorkPhase } from "./work_phase.ts";
 import type { WorkPhase } from "./work_phase.ts";
 import { OutputStateStore, OUTPUTS } from "./output_state.ts";
-import { TitleStore, normalizeTitle } from "./title_state.ts";
+import { TitleStore, normalizeTitle, encodeProjectName } from "./title_state.ts";
 import { AvatarStateStore } from "./avatar_state.ts";
 import { avatarNames, findAvatar } from "./avatar_selection.ts";
 
@@ -217,6 +219,11 @@ export default function (pi: ExtensionAPI) {
   let usbWarned: string | null = null;
   /** First successful send per link, so "nothing is queued" is distinguishable. */
   let usbSentReported = false;
+  /** USB receiver idle-clock handoff: strict >300000 ms settled eligibility via the shared IdleClock. */
+  let usbIdleClock: IdleClock | null = null;
+  let usbClockMode: "off" | "receiver" | "silence" = "off";
+  let usbClockTimer: ReturnType<typeof setInterval> | null = null;
+  let usbClockAmbient = false;
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
@@ -234,6 +241,10 @@ export default function (pi: ExtensionAPI) {
   const displayActivity = new DisplayActivityTracker(activity => {
     externalDisplay?.updateActivity(activity);
     d200Display?.updateActivity(activity);
+    if (usbIdleClock !== null && usbClockMode !== "off") {
+      usbIdleClock.update(activity, performance.now(), lastFrameImage?.state);
+      refreshUsbClock(true);
+    }
   });
   /** Native subagent task lifecycle (Gentle Shell bus); null falls back to the call-based count. */
   const subagentTasks = new SubagentTaskTracker(count => {
@@ -321,6 +332,7 @@ export default function (pi: ExtensionAPI) {
       const current = usbDisplay;
       usbDisplay = null;
       usbPending = null;
+      stopUsbClock();
       if (current) void current.stop();
       ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display off`, "info");
       return true;
@@ -346,7 +358,15 @@ export default function (pi: ExtensionAPI) {
     usbCtx = ctx;
     usbWarned = null;
     usbSentReported = false;
-    void link.sendControl("claim");
+    startUsbClock();
+    // A refused claim used to vanish into a void promise: the receiver would
+    // keep its previous session while this one believed it owned the display.
+    void link.sendControl("claim").then(result => {
+      if (result.ok) return;
+      usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb claim rejected: ${result.error}`, "warning");
+    }).catch(error => {
+      usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb claim send failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    });
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
     // `displayOn`/`displayOff` govern the HTTP destinations only: the serial link
     // must deliver with every HTTP output off. When no HTTP target existed at
@@ -359,27 +379,124 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  /** USB clock mode: the group's explicit choice, with the approved receiver default when omitted. */
+  function usbIdleClockMode(): "off" | "receiver" | "silence" {
+    const configured = config.externalDisplay.idleClock;
+    if (configured === undefined) return "receiver";
+    return configured === "off" || configured === "receiver" || configured === "silence" ? configured : "off";
+  }
+
+  /** Clock truth begins with the link itself: a fresh deadline and the 1 Hz ambient check. */
+  function startUsbClock(): void {
+    usbIdleClock = new IdleClock(performance.now());
+    usbClockMode = usbIdleClockMode();
+    usbClockAmbient = false;
+    if (usbClockMode !== "off") {
+      usbClockTimer = setInterval(() => refreshUsbClock(true), IDLE_CLOCK_TICK_MS);
+      usbClockTimer.unref?.();
+    }
+  }
+
+  /** USB off, session start reset or shutdown: no clock truth without a live link. */
+  function stopUsbClock(): void {
+    if (usbClockTimer) { clearInterval(usbClockTimer); usbClockTimer = null; }
+    usbIdleClock = null;
+    usbClockMode = "off";
+    usbClockAmbient = false;
+  }
+
   /**
-   * Queues the composed 64x64 image for the serial link. The firmware validates
-   * the PNG envelope just like the HTTP path, and the raw sprite is 48x40, so the
-   * composed bytes are what travels; a composition failure never blocks the
-   * other outputs.
+   * Applies the ambient transition of the USB idle clock. At the strict >300000 ms
+   * deadline the receiver mode queues exactly one clock-tagged carrier composed
+   * from the current avatar and title, and silence drops pending traffic plus the
+   * link's own heartbeats. Real activity ends the ambient period immediately; the
+   * ordinary latest frame (receiver) or the heartbeats (silence) resume. `resume`
+   * pushes the latest ordinary frame on transitions not driven by a fresh selection.
    */
-  function queueUsbFrame(image: SelectedImage): void {
-    if (!usbDisplay) return;
+  function refreshUsbClock(resume: boolean): void {
+    if (usbIdleClock === null || usbClockMode === "off" || !usbDisplay) return;
+    const ambient = usbIdleClock.isActive(performance.now());
+    if (ambient === usbClockAmbient) return;
+    usbClockAmbient = ambient;
+    if (ambient && usbClockMode === "receiver") {
+      queueUsbClockCarrier();
+    } else if (ambient) {
+      usbPending = null;
+      usbDisplay.setQuiet(true);
+    } else if (usbClockMode === "silence") {
+      usbDisplay.setQuiet(false);
+    } else if (resume && lastFrameImage) {
+      queueUsbFrame(lastFrameImage);
+    }
+  }
+
+  /**
+   * The one clock-tagged carrier of a receiver ambient period: the current avatar
+   * and its live validated title composed once at the deadline, sent with the
+   * protocol's existing clock flag (state "clock"). Any stale pending ordinary
+   * frame is replaced: after the carrier only the clock or a later real frame travels.
+   */
+  function queueUsbClockCarrier(): void {
+    if (!usbDisplay || !lastFrameImage) return;
+    const composed = composeUsbImage(lastFrameImage);
+    if (!composed) return;
+    usbPending = { ...composed, state: "clock" };
+    pumpUsb();
+  }
+
+  /** Shared LED composition for the USB link; null (with a once-per-cause warning) when it fails. */
+  function composeUsbImage(image: SelectedImage): { base64: string; state: string } | null {
     try {
+      // LED layout parity with the HTTP composition: the group outline (white by
+      // default, like every non-loopback LED destination), the effective validated
+      // title (saved override or folder basename, omitted when invalid) and the
+      // context-banded caption ink from the host usage this session already has.
+      const folderName = typeof cwd === "string" ? basename(cwd) : null;
+      const title = projectTitle ?? folderName;
+      const band = contextPercent === null || contextPercent < 60
+        ? "green" : contextPercent <= 80 ? "yellow" : "red";
       const composed = prepareDisplayImage(
         image.base64,
         { ...displayActivity.snapshot(), state: image.state },
         config.externalDisplay.background,
         config.externalDisplay.backgroundCoverage,
-        undefined,
+        config.externalDisplay.outline ?? "#ffffff",
         config.externalDisplay.transparentBackground,
-        null,
+        title !== null && encodeProjectName(title) !== null ? title : null,
+        band === "red" ? [255, 0, 0] : band === "yellow" ? [255, 255, 0] : [0, 255, 0],
       );
-      usbPending = { base64: composed.toString("base64"), state: image.state };
-      pumpUsb();
-    } catch { /* compose failures are never fatal */ }
+      return { base64: composed.toString("base64"), state: image.state };
+    } catch (error) {
+      // Composition failures are never fatal, but a silent one made a broken
+      // destination look like a working link: the cause is reported once.
+      const message = `usb image composition failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (usbWarned === message) return null;
+      usbWarned = message;
+      usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning");
+      return null;
+    }
+  }
+
+  /**
+   * Queues the composed 64x64 image for the serial link. The firmware validates
+   * the PNG envelope just like the HTTP path, and the raw sprite is 48x40, so the
+   * composed bytes are what travels; a composition failure never blocks the
+   * other outputs. While the ambient clock owns the panel, ordinary frames are
+   * suppressed: receiver mode already sent its one carrier and silence drops
+   * traffic entirely. Selections still update the idle clock, so a non-idle
+   * state ends the ambient period and resumes ordinary delivery immediately.
+   */
+  function queueUsbFrame(image: SelectedImage): void {
+    if (!usbDisplay) return;
+    if (usbIdleClock !== null && usbClockMode !== "off") {
+      usbIdleClock.update(displayActivity.snapshot(), performance.now(), image.state);
+      refreshUsbClock(false);
+      if (usbClockAmbient) return;
+    }
+    const composed = composeUsbImage(image);
+    if (!composed) return;
+    usbPending = composed;
+    pumpUsb();
   }
 
   /** Bounded latest-frame delivery: one send in flight, intermediate frames dropped. */
@@ -402,6 +519,13 @@ export default function (pi: ExtensionAPI) {
       if (usbWarned === result.error) return;
       usbWarned = result.error;
       usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb frame rejected: ${result.error}`, "warning");
+    }).catch(error => {
+      // A failed write used to be an unhandled rejection: the frame was lost
+      // without a trace. The cause is reported once per change, like a NACK.
+      const message = `usb frame send failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (usbWarned === message) return;
+      usbWarned = message;
+      usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning");
     }).finally(() => {
       usbBusy = false;
       pumpUsb();
@@ -1092,6 +1216,9 @@ export default function (pi: ExtensionAPI) {
         projectTitle = next;
         externalDisplay?.setTitle(next);
         d200Display?.setTitle(next);
+        // The USB output composes its own PNG: requeue the current frame so the
+        // caption changes immediately, including the reset to the folder name.
+        if (lastFrameImage) queueUsbFrame(lastFrameImage);
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] display title ${next === null ? "restored to the project folder name" : `set to "${next}"`}`, "info");
         return;
       }
@@ -1158,6 +1285,7 @@ export default function (pi: ExtensionAPI) {
     d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
     usbDisplay = null;
     usbPort = null;
+    stopUsbClock();
     if (ownsSharedDisplays && states.usb) void setUsbDisplay(true, ctx);
     applyProjectTitle();
     refreshContextUsage(ctx);
@@ -1223,6 +1351,7 @@ export default function (pi: ExtensionAPI) {
     void usbDisplay?.stop();
     usbDisplay = null;
     usbPending = null;
+    stopUsbClock();
     unwatchBanner();
     stopTerminalInput?.();
     stopTerminalInput = null;

@@ -60,6 +60,8 @@ export interface SerialDisplay {
   sendImage(image: SerialImage): Promise<SerialSendResult>;
   sendControl(op: Exclude<SerialOp, "image">): Promise<SerialSendResult>;
   stop(): Promise<void>;
+  /** Suppresses the link's own heartbeat frames while true; images and controls still send. */
+  setQuiet(quiet: boolean): void;
   readonly path: string | null;
 }
 
@@ -77,6 +79,8 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
   let chain: Promise<unknown> = Promise.resolve();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let stopping = false;
+  /** Silence-mode support: no heartbeat frames leave the link while true. */
+  let quiet = false;
 
   const onData = (chunk: Buffer): void => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -209,7 +213,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
         return { ok: false, error: `${target} did not answer the serial handshake` };
       }
       heartbeat = setInterval(() => {
-        if (!port || waiter || stopping) return;
+        if (!port || waiter || stopping || quiet) return;
         void enqueue(() => transmit(id => buildSerialFrame({ op: "heartbeat", requestId: id, sessionId: deps.sessionId! })));
       }, heartbeatMs);
       heartbeat.unref?.();
@@ -230,6 +234,8 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
     sendControl(op: Exclude<SerialOp, "image">): Promise<SerialSendResult> {
       return enqueue(() => transmit(id => buildSerialFrame({ op, requestId: id, sessionId: deps.sessionId ?? undefined })));
     },
+
+    setQuiet(value: boolean): void { quiet = value; },
 
     async stop(): Promise<void> {
       stopping = true;

@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { OutputStateStore, OUTPUTS } from "../src/output_state.ts";
 import { decodePng, encodePng } from "../src/png.ts";
-import { useSerialSystemDeps } from "../src/serial_display.ts";
+import { prepareDisplayImage } from "../src/display_image.ts";
+import { useSerialSystemDeps, type SerialPortLike } from "../src/serial_display.ts";
+import { SERIAL_ENTER, SERIAL_ENTER_ACK, SERIAL_EXIT, SERIAL_EXIT_ACK, MAX_PNG_BYTES } from "../src/serial_protocol.ts";
 import { crc32 } from "node:zlib";
 
 const PLACEHOLDER = "\u{10EEEE}";
@@ -1648,6 +1650,531 @@ test("usbOn fails closed without a serial module or a valid port, and never save
     await emote.handler("usbOff", lab.ctx);
     await flush();
     assert.equal(new OutputStateStore(profile).load(() => {}).usb, false, "usbOff saves the off preference");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function serialReply(requestId: number, result: number): Buffer {
+  const head = Buffer.alloc(8);
+  head.write("EMTR", 0, "latin1");
+  head[4] = 1;
+  head[5] = result;
+  head.writeUInt16LE(requestId, 6);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32LE(crc32(head), 0);
+  return Buffer.concat([head, crc]);
+}
+
+/** A fake CDC peer speaking protocol v1, mirroring the serial_display unit fake. */
+function fakeCdcPort(options: { answers?: Array<number | "silent">; failWrite?: (data: Buffer) => boolean } = {}) {
+  const listeners: Array<(chunk: Buffer) => void> = [];
+  const written: Buffer[] = [];
+  const answers = [...(options.answers ?? [])];
+  const frames: Buffer[] = [];
+  const emit = (chunk: Buffer) => {
+    for (const listener of listeners) listener(chunk);
+  };
+  const port: SerialPortLike = {
+    write(data: Buffer, callback?: (error?: Error | null) => void) {
+      const copy = Buffer.from(data);
+      written.push(copy);
+      const failed = options.failWrite?.(copy) ?? false;
+      const text = copy.toString("latin1");
+      if (text === SERIAL_ENTER) {
+        queueMicrotask(() => emit(Buffer.from(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), String.fromCharCode(10)))));
+      } else if (text === SERIAL_EXIT) {
+        queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK.replace(String.fromCharCode(10), String.fromCharCode(10)))));
+      } else if (copy.subarray(0, 4).toString("latin1") === "EMTS") {
+        frames.push(copy);
+        const id = copy.readUInt16LE(8);
+        const answer = answers.length > 0 ? answers.shift()! : 0;
+        // A write that failed at the port never reached the device, so it is
+        // not answered: the sender observes the rejection, not a reply.
+        if (!failed && answer !== "silent") queueMicrotask(() => emit(serialReply(id, answer as number)));
+      }
+      callback?.(failed ? new Error("fake write failure") : null);
+    },
+    close(callback?: (error?: Error | null) => void) { callback?.(null); },
+    on(_event: string, handler: (chunk: Buffer) => void) { listeners.push(handler); },
+    off() {},
+  };
+  return { port, written, frames, answers };
+}
+
+/** Lets queued microtask replies and promise chains settle. */
+const drain = async () => {
+  for (let i = 0; i < 20; i++) await new Promise<void>(resolve => setImmediate(resolve));
+};
+
+const countNotice = (notices: Array<{ message: string; level: string }>, pattern: RegExp) =>
+  notices.filter(notice => pattern.test(notice.message));
+
+test("usbOn reports the first accepted frame and repeats a firmware rejection once per cause", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-frames-"));
+  const profile = join(root, "profile");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+    const emote = lab.commands.get("emote");
+
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.ok(lab.notices.some(n => /usb serial display: COM5/.test(n.message)), "the display starts");
+    const accepted = countNotice(lab.notices, /usb frame accepted \(\d+ b64 chars\)/);
+    assert.equal(accepted.length, 1, "the first accepted frame is reported once");
+    assert.equal(accepted[0]?.level, "info", "an accepted frame is informational");
+
+    // A firmware NACK (repeated across the one resend) must be visible, and the
+    // same cause must not flood the notice channel on every later frame.
+    peer.answers.push(2, 2, 2, 2);
+    await emote.handler("tool", lab.ctx);
+    await drain();
+    assert.equal(countNotice(lab.notices, /usb frame rejected: rejected by the display: result 2/).length, 1,
+      "the rejected frame is reported once");
+    assert.equal(countNotice(lab.notices, /usb frame rejected/).at(-1)?.level, "warning");
+    // A different state guarantees a fresh frame selection, so the same cause
+    // is proven suppressed rather than merely never re-sent.
+    await emote.handler("read", lab.ctx);
+    await drain();
+    assert.equal(countNotice(lab.notices, /usb frame rejected: rejected by the display: result 2/).length, 1,
+      "the same rejection cause is not repeated");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOn reports image composition failures once per cause", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-compose-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  mkdirSync(join(project, ".pi", "extensions", "gentle-emote"), { recursive: true });
+  writeFileSync(join(project, ".pi", "extensions", "gentle-emote", "config.json"),
+    JSON.stringify({ externalDisplay: { background: "gray", transparentBackground: true } }));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(project, [], profile);
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+    const emote = lab.commands.get("emote");
+
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.ok(lab.notices.some(n => /usb serial display: COM5/.test(n.message)), "the display still starts");
+    assert.equal(countNotice(lab.notices, /usb image composition failed/).length, 1,
+      "the composition failure is reported once");
+    assert.equal(countNotice(lab.notices, /usb image composition failed/)[0]?.level, "warning");
+    assert.equal(countNotice(lab.notices, /usb frame accepted/).length, 0,
+      "a composition failure queues nothing for delivery");
+    await emote.handler("tool", lab.ctx);
+    await drain();
+    assert.equal(countNotice(lab.notices, /usb image composition failed/).length, 1,
+      "the same composition failure is not repeated");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOn reports a failed frame write once per cause", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-sendfail-"));
+  const profile = join(root, "profile");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const peer = fakeCdcPort({ failWrite: data => data.subarray(0, 4).toString("latin1") === "EMTS" && peer.frames.length > 0 });
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+    const emote = lab.commands.get("emote");
+
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.ok(lab.notices.some(n => /usb serial display: COM5/.test(n.message)), "the claim write still succeeds");
+    await emote.handler("tool", lab.ctx);
+    await drain();
+    assert.equal(countNotice(lab.notices, /usb frame send failed: fake write failure/).length, 1,
+      "a rejected send promise is reported once");
+    assert.equal(countNotice(lab.notices, /usb frame send failed/)[0]?.level, "warning");
+    await emote.handler("tool", lab.ctx);
+    await drain();
+    assert.equal(countNotice(lab.notices, /usb frame send failed: fake write failure/).length, 1,
+      "the same send failure is not repeated");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOn reports a claim rejection and a failed claim write", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-claim-"));
+  const profile = join(root, "profile");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    // The claim is the first EMTS frame; two NACKs exhaust the single resend.
+    const nackPeer = fakeCdcPort({ answers: [3, 3] });
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => nackPeer.port });
+    let emote = lab.commands.get("emote");
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.ok(lab.notices.some(n => /usb serial display: COM5/.test(n.message)), "the display starts even when the claim is refused");
+    const rejected = countNotice(lab.notices, /usb claim rejected: rejected by the display: result 3/);
+    assert.equal(rejected.length, 1, "a claim NACK is reported");
+    assert.equal(rejected[0]?.level, "warning");
+
+    await lab.shutdown();
+    lab.restore();
+    lab = undefined;
+
+    // A claim whose write fails must surface too, not vanish into a void promise.
+    lab = await boot(root, [], profile);
+    const failPeer = fakeCdcPort({ failWrite: data => data.subarray(0, 4).toString("latin1") === "EMTS" });
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => failPeer.port });
+    emote = lab.commands.get("emote");
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    const failed = countNotice(lab.notices, /usb claim send failed: fake write failure/);
+    assert.equal(failed.length, 1, "a rejected claim promise is reported");
+    assert.equal(failed[0]?.level, "warning");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- USB layout parity with the HTTP LED composition (outline + title) ---
+
+/** Solid opaque sprite with no accent-key pixels, so the frame base64 stays byte-identical. */
+const LED_SPRITE = (() => {
+  const width = 12, height = 8;
+  const data = new Uint8Array(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) { data[i] = 180; data[i + 1] = 60; data[i + 2] = 40; data[i + 3] = 255; }
+  return encodePng({ width, height, data });
+})();
+const LED_SPRITE_BASE64 = LED_SPRITE.toString("base64");
+/** The LED caption ink the HTTP composition uses by default (green context band). */
+const USB_LED_INK: [number, number, number] = [0, 255, 0];
+
+/** The exact bytes the USB composition must carry for the given LED layout inputs. */
+function expectedUsbLedImage(title: string | null, outline: string): Buffer {
+  return prepareDisplayImage(
+    LED_SPRITE_BASE64,
+    { status: "idle", phase: "idle", activeSubagents: 0, state: "think" },
+    "#000000", 1, outline, false, title, USB_LED_INK,
+  );
+}
+
+/** Extracts the raw PNG payload of a captured EMTS frame (op 0 = image). */
+function usbImagePayload(frame: Buffer): Buffer {
+  const sessionIdLength = frame.readUInt16LE(10);
+  const nameLength = frame.readUInt16LE(12);
+  const payloadLength = frame.readUInt32LE(14);
+  return frame.subarray(18 + sessionIdLength + nameLength, 18 + sessionIdLength + nameLength + payloadLength);
+}
+
+/** Boots a project with a single-frame sprite set and a fake CDC peer for usbOn. */
+async function bootUsbLayoutLab(root: string, outline?: string) {
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(join(dir, "emotes", "ledsprite", "think"), { recursive: true });
+  writeFileSync(join(dir, "emotes", "ledsprite", "think", "think.png"), LED_SPRITE);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    emotes: [{ model: "*", "emote-set": "ledsprite" }],
+    ...(outline === undefined ? {} : { externalDisplay: { outline } }),
+  }));
+  const peer = fakeCdcPort();
+  const lab = await boot(root, [], join(root, "profile"));
+  // boot() installs its own empty serial deps, so the fake peer is bound after it.
+  useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+  return { lab, peer, emote: lab.commands.get("emote") };
+}
+
+test("usbOn composes the same LED outline as displayOn: white by default, configured color overrides", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-outline-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  const imageFrames = (peer: { frames: Buffer[] }) => peer.frames.filter(frame => frame[5] === 0);
+  try {
+    // No outline configured: the USB composition must behave like a non-loopback
+    // LED destination and still receive the white silhouette.
+    let boot1 = await bootUsbLayoutLab(root);
+    lab = boot1.lab;
+    await boot1.emote.handler("usbOn", lab.ctx);
+    await drain();
+    await boot1.emote.handler("think", lab.ctx);
+    await drain();
+    assert.ok(imageFrames(boot1.peer).length > 0, "usbOn delivers the preview frame");
+    assert.ok(usbImagePayload(imageFrames(boot1.peer).at(-1)!).equals(expectedUsbLedImage(basename(root), "#ffffff")),
+      "the USB composition carries the default white LED outline");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+
+    // A configured group outline overrides the default on USB, like on the LAN.
+    const outlined = join(root, "outlined");
+    const boot2 = await bootUsbLayoutLab(outlined, "#2a7fff");
+    lab = boot2.lab;
+    await boot2.emote.handler("usbOn", lab.ctx);
+    await drain();
+    await boot2.emote.handler("think", lab.ctx);
+    await drain();
+    assert.ok(imageFrames(boot2.peer).length > 0, "usbOn delivers the preview frame again");
+    assert.ok(usbImagePayload(imageFrames(boot2.peer).at(-1)!).equals(expectedUsbLedImage(basename(outlined), "#2a7fff")),
+      "the USB composition carries the configured outline color");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOn captions the effective project title and /emote title recomposes the live USB frame", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-title-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    const boot1 = await bootUsbLayoutLab(root);
+    lab = boot1.lab;
+    const imageFrames = () => boot1.peer.frames.filter(frame => frame[5] === 0);
+    await boot1.emote.handler("usbOn", lab.ctx);
+    await drain();
+    await boot1.emote.handler("think", lab.ctx);
+    await drain();
+    const folder = basename(root);
+    assert.ok(imageFrames().length > 0, "usbOn delivers the preview frame");
+    assert.ok(usbImagePayload(imageFrames().at(-1)!).equals(expectedUsbLedImage(folder, "#ffffff")),
+      "the fallback caption is the validated project folder basename");
+    assert.ok(usbImagePayload(imageFrames().at(-1)!).length <= MAX_PNG_BYTES,
+      "the captioned payload fits the serial cap");
+
+    // A live title set recomposes the current USB frame immediately, without
+    // waiting for another animation selection.
+    const before = imageFrames().length;
+    await boot1.emote.handler("title  USB Título ", lab.ctx);
+    await drain();
+    assert.ok(imageFrames().length > before, "/emote title requeues the current USB frame immediately");
+    assert.ok(usbImagePayload(imageFrames().at(-1)!).equals(expectedUsbLedImage("USB Título", "#ffffff")),
+      "the live caption uses the saved title");
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "title.json"), "utf8")), { title: "USB Título" });
+
+    // A rejected title mutates nothing and sends no frame.
+    const rejected = imageFrames().length;
+    await boot1.emote.handler("title a/b", lab.ctx);
+    await drain();
+    assert.equal(imageFrames().length, rejected, "an invalid title sends no USB frame");
+    assert.equal(lab.notices.at(-1)?.level, "warning");
+    assert.match(lab.notices.at(-1)?.message ?? "", /invalid title/);
+
+    // The bare reset recomposes with the folder basename again.
+    await boot1.emote.handler("title", lab.ctx);
+    await drain();
+    assert.ok(imageFrames().length > rejected, "the bare reset recomposes the USB frame");
+    assert.ok(usbImagePayload(imageFrames().at(-1)!).equals(expectedUsbLedImage(folder, "#ffffff")),
+      "the bare reset restores the folder basename caption");
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "title.json"), "utf8")), { title: null });
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- USB receiver idle-clock handoff ---
+
+/** The exact bytes the USB clock carrier must carry: the settled avatar composed like an ordinary frame. */
+function expectedUsbClockCarrier(title: string | null, outline: string): Buffer {
+  return prepareDisplayImage(
+    LED_SPRITE_BASE64,
+    { status: "idle", phase: "idle", activeSubagents: 0, state: "idle" },
+    "#000000", 1, outline, false, title, USB_LED_INK,
+  );
+}
+
+/** Boots a project with idle and think sprite frames, a fake CDC peer and an optional group clock mode. */
+async function bootUsbClockLab(root: string, idleClock?: "off" | "receiver" | "silence") {
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(join(dir, "emotes", "ledsprite", "idle"), { recursive: true });
+  mkdirSync(join(dir, "emotes", "ledsprite", "think"), { recursive: true });
+  writeFileSync(join(dir, "emotes", "ledsprite", "idle", "idle.png"), LED_SPRITE);
+  writeFileSync(join(dir, "emotes", "ledsprite", "idle", "idle_blink.png"), LED_SPRITE);
+  writeFileSync(join(dir, "emotes", "ledsprite", "think", "think.png"), LED_SPRITE);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    emotes: [{ model: "*", "emote-set": "ledsprite" }],
+    ...(idleClock === undefined ? {} : { externalDisplay: { idleClock } }),
+  }));
+  const peer = fakeCdcPort();
+  const lab = await boot(root, [], join(root, "profile"));
+  useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+  return { lab, peer, emote: lab.commands.get("emote") };
+}
+
+test("usbOn defaults to the receiver clock handoff: one carrier past five idle minutes, resumed on activity", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    // Deterministic monotonic clock: no five-minute wait, no real timer reliance.
+    let elapsed = 1_000;
+    t.mock.method(performance, "now", () => elapsed);
+    const booted = await bootUsbClockLab(root);
+    lab = booted.lab;
+    const imageFrames = () => booted.peer.frames.filter(frame => frame[5] === 0);
+    const clockFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 4);
+    const ordinaryFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 0);
+
+    await booted.emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.ok(ordinaryFrames().length > 0, "the link starts with the settled idle frame");
+
+    // The carrier caption is the same live validated project title the ordinary
+    // frames use; set it before the deadline so both compositions carry it.
+    await booted.emote.handler("title USB Clock", lab.ctx);
+    await drain();
+    const afterTitle = ordinaryFrames().length;
+    assert.ok(afterTitle > 1, "the title recomposition requeues the settled frame");
+
+    // Settled but exactly at the strict deadline: nothing is handed off yet.
+    elapsed = 1_000 + 300_000;
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 0, "exactly 300000 ms of settled idleness is not enough");
+
+    // Past the strict deadline the receiver gets exactly one clock-tagged carrier
+    // composed from the current avatar and its live validated title.
+    elapsed = 1_000 + 300_001;
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 1, "the timeout queues exactly one clock carrier");
+    assert.ok(usbImagePayload(clockFrames()[0]!).equals(expectedUsbClockCarrier("USB Clock", "#ffffff")),
+      "the carrier is the current avatar composed with the live title and the LED layout");
+
+    // The ambient period owns the panel: further settled activity and ordinary
+    // idle selections send nothing more.
+    elapsed = 1_000 + 300_500;
+    await lab.emit("agent_end");
+    await drain();
+    await booted.emote.handler("idle", lab.ctx);
+    await drain();
+    assert.equal(clockFrames().length, 1, "the carrier is never repeated");
+    assert.equal(ordinaryFrames().length, afterTitle, "ordinary frames stay suppressed while ambient");
+
+    // Real activity ends the ambient period immediately with an ordinary frame.
+    await booted.emote.handler("think", lab.ctx);
+    await drain();
+    assert.equal(clockFrames().length, 1, "resuming never touches the carrier");
+    assert.equal(ordinaryFrames().length, afterTitle + 1, "the latest ordinary frame resumes delivery at once");
+    assert.equal(ordinaryFrames().at(-1)![6] & 4, 0, "the resumed frame is an ordinary avatar frame");
+    assert.ok(usbImagePayload(ordinaryFrames().at(-1)!).equals(expectedUsbLedImage("USB Clock", "#ffffff")),
+      "the resumed frame is the latest avatar with its caption");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit externalDisplay.idleClock off keeps ordinary USB delivery past the deadline", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-off-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    let elapsed = 1_000;
+    t.mock.method(performance, "now", () => elapsed);
+    const booted = await bootUsbClockLab(root, "off");
+    lab = booted.lab;
+    const imageFrames = () => booted.peer.frames.filter(frame => frame[5] === 0);
+    const clockFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 4);
+    const ordinaryFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 0);
+
+    await booted.emote.handler("usbOn", lab.ctx);
+    await drain();
+    const started = ordinaryFrames().length;
+    assert.ok(started > 0, "the link starts with the settled idle frame");
+
+    elapsed = 1_000 + 300_001;
+    await lab.emit("agent_end");
+    await drain();
+    await booted.emote.handler("idle", lab.ctx);
+    await drain();
+    assert.equal(clockFrames().length, 0, "an explicit off never hands the panel to the clock");
+    assert.ok(ordinaryFrames().length > started, "ordinary delivery continues past the deadline");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit externalDisplay.idleClock silence stops USB image traffic while ambient and resumes on activity", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-silence-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    let elapsed = 1_000;
+    t.mock.method(performance, "now", () => elapsed);
+    const booted = await bootUsbClockLab(root, "silence");
+    lab = booted.lab;
+    const imageFrames = () => booted.peer.frames.filter(frame => frame[5] === 0);
+    const clockFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 4);
+    const ordinaryFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 0);
+
+    await booted.emote.handler("usbOn", lab.ctx);
+    await drain();
+    const started = ordinaryFrames().length;
+    assert.ok(started > 0, "the link starts with the settled idle frame");
+
+    elapsed = 1_000 + 300_001;
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 0, "silence never composes a clock carrier");
+    await booted.emote.handler("idle", lab.ctx);
+    await drain();
+    assert.equal(ordinaryFrames().length, started, "image traffic is suppressed while silenced");
+
+    await booted.emote.handler("think", lab.ctx);
+    await drain();
+    assert.ok(ordinaryFrames().length > started, "ordinary delivery resumes immediately on activity");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("usbOff clears the clock truth and a restarted link starts its five minutes over", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-reset-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    let elapsed = 1_000;
+    t.mock.method(performance, "now", () => elapsed);
+    const booted = await bootUsbClockLab(root);
+    lab = booted.lab;
+    const clockFrames = () => booted.peer.frames.filter(frame => frame[5] === 0 && (frame[6] & 4) === 4);
+    const ordinaryFrames = () => booted.peer.frames.filter(frame => frame[5] === 0 && (frame[6] & 4) === 0);
+
+    // The idle time already accumulated before the link starts owns nothing:
+    // the clock truth begins with the link itself.
+    elapsed = 1_000 + 300_001;
+    await booted.emote.handler("usbOn", lab.ctx);
+    await drain();
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 0, "a fresh link starts its idle deadline at zero");
+
+    await booted.emote.handler("usbOff", lab.ctx);
+    await drain();
+    await booted.emote.handler("usbOn", lab.ctx);
+    await drain();
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 0, "a restarted link starts its idle deadline at zero again");
+    assert.ok(ordinaryFrames().length > 0, "ordinary delivery continues across the restart");
+
+    elapsed += 300_001;
+    await lab.emit("agent_end");
+    await drain();
+    assert.equal(clockFrames().length, 1, "the restarted link hands off once its own deadline elapses");
   } finally {
     await lab?.shutdown();
     lab?.restore();
