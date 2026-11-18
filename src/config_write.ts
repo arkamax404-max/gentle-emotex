@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /**
@@ -53,35 +53,79 @@ export function isPanelConfigKey(value: unknown): value is PanelConfigKey {
  * temporary sibling is written and renamed over the file, so a crash never
  * leaves a half-written configuration, and every unrelated key survives.
  */
+const LOCK_TIMEOUT_MS = 250;
+const LOCK_RETRY_MS = 10;
+const LOCK_STALE_MS = 5_000;
+
+/** Blocks this attempt only; total wait is bounded by LOCK_TIMEOUT_MS. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Exclusive create of a sibling lock file, with stale-lock takeover. */
+function acquireLock(lockFile: string): boolean {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      writeFileSync(lockFile, String(process.pid), { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      try {
+        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(lockFile);
+          continue;
+        }
+      } catch { /* the lock vanished between attempts: retry now */ }
+      if (Date.now() >= deadline) return false;
+      pause(LOCK_RETRY_MS);
+    }
+  }
+}
+
 export function writePanelConfig(agentRoot: string, key: PanelConfigKey, value: unknown): ConfigWriteResult {
   if (!isPanelConfigKey(key)) return { ok: false, error: "unsupported configuration key" };
   const invalid = validatePanelConfigValue(key, value);
   if (invalid !== null) return { ok: false, error: invalid };
 
   const file = join(agentRoot, "extensions", "gentle-emote", "config.json");
-  let current: Record<string, unknown> = {};
-  if (existsSync(file)) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(file, "utf-8"));
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { ok: false, error: "cannot read configuration" };
-      }
-      current = parsed as Record<string, unknown>;
-    } catch {
-      return { ok: false, error: "cannot read configuration" };
-    }
+  const lockFile = `${file}.lock`;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+  } catch {
+    return { ok: false, error: "cannot write configuration" };
   }
 
-  const temporary = `${file}.${process.pid}.tmp`;
+  // One shared configuration, many running sessions: the read, the merge and the
+  // rename must happen under a single exclusive lock, otherwise two sessions
+  // changing different keys each rename a stale snapshot and silently discard
+  // the other's choice while both report success.
+  if (!acquireLock(lockFile)) return { ok: false, error: "configuration is busy" };
+
   try {
-    // A fresh agent directory has no config file and may not even have the
-    // extension directory yet; creating it is safe, guessing the file is not.
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(temporary, `${JSON.stringify({ ...current, [key]: value }, null, 2)}\n`, "utf-8");
-    renameSync(temporary, file);
-    return { ok: true, error: null };
-  } catch {
-    try { unlinkSync(temporary); } catch { /* nothing to clean up */ }
-    return { ok: false, error: "cannot write configuration" };
+    let current: Record<string, unknown> = {};
+    if (existsSync(file)) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(file, "utf-8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return { ok: false, error: "cannot read configuration" };
+        }
+        current = parsed as Record<string, unknown>;
+      } catch {
+        return { ok: false, error: "cannot read configuration" };
+      }
+    }
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify({ ...current, [key]: value }, null, 2)}
+`, "utf-8");
+      renameSync(temporary, file);
+      return { ok: true, error: null };
+    } catch {
+      try { unlinkSync(temporary); } catch { /* nothing to clean up */ }
+      return { ok: false, error: "cannot write configuration" };
+    }
+  } finally {
+    try { unlinkSync(lockFile); } catch { /* already gone */ }
   }
 }

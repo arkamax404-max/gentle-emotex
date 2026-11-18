@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { writePanelConfig, validatePanelConfigValue, PANEL_CONFIG_KEYS } from "../src/config_write.ts";
 
 function workspace(): { root: string; file: string; cleanup: () => void } {
@@ -102,4 +104,56 @@ test("a write failure reports an error instead of claiming success", () => {
     // writer must refuse instead of claiming success either way.
     assert.match(result.error ?? "", /cannot (read|write) configuration/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a held lock blocks the write instead of clobbering it", () => {
+  const space = workspace();
+  try {
+    writeFileSync(space.file, JSON.stringify({ size: 10 }));
+    const lock = `${space.file}.lock`;
+    writeFileSync(lock, "other-process");
+    const started = Date.now();
+    const result = writePanelConfig(space.root, "frame", true);
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "configuration is busy", "the second writer never reports success");
+    assert.deepEqual(JSON.parse(readFileSync(space.file, "utf8")), { size: 10 }, "the file is untouched");
+    assert.ok(Date.now() - started < 2_000, "the attempt is bounded");
+    rmSync(lock, { force: true });
+  } finally { space.cleanup(); }
+});
+
+test("a stale lock is taken over so a crashed writer cannot wedge the file", () => {
+  const space = workspace();
+  try {
+    writeFileSync(space.file, JSON.stringify({ size: 10 }));
+    const lock = `${space.file}.lock`;
+    writeFileSync(lock, "dead-process");
+    const old = Date.now() - 60_000;
+    utimesSync(lock, new Date(old), new Date(old));
+    assert.deepEqual(writePanelConfig(space.root, "frame", true), { ok: true, error: null });
+    assert.deepEqual(JSON.parse(readFileSync(space.file, "utf8")), { size: 10, frame: true });
+    assert.equal(existsSync(lock), false, "the taken-over lock is released");
+  } finally { space.cleanup(); }
+});
+
+test("two concurrent processes keep both keys instead of losing one", async () => {
+  const space = workspace();
+  writeFileSync(space.file, JSON.stringify({ enabled: true }));
+  const moduleUrl = pathToFileURL(join(process.cwd(), "src", "config_write.ts")).href;
+  const run = (key: string, value: string) => {
+    const script = `import(${JSON.stringify(moduleUrl)}).then((m) => { for (let i = 0; i < 8; i++) m.writePanelConfig(process.argv[1], process.argv[2], JSON.parse(process.argv[3])); });`;
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script, space.root, key, value], { stdio: "ignore" });
+      child.on("error", reject);
+      child.on("exit", code => (code === 0 ? resolve() : reject(new Error(`child exited ${code}`))));
+    });
+  };
+  try {
+    await Promise.all([run("size", "12"), run("frame", "false")]);
+    const written = JSON.parse(readFileSync(space.file, "utf8"));
+    assert.equal(written.size, 12, "the size choice survives");
+    assert.equal(written.frame, false, "the frame choice survives the same window");
+    assert.equal(written.enabled, true, "unrelated keys survive as well");
+    assert.equal(existsSync(`${space.file}.lock`), false, "the lock is released");
+  } finally { space.cleanup(); }
 });
