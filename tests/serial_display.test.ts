@@ -19,7 +19,7 @@ function reply(requestId: number, result: number): Buffer {
 }
 
 /** A fake CDC peer that speaks protocol v1 and records what the sender wrote. */
-function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent"> } = {}) {
+function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent">; lineEnd?: string } = {}) {
   const listeners: Array<(chunk: Buffer) => void> = [];
   const written: Buffer[] = [];
   const answers = [...(options.answers ?? [])];
@@ -31,9 +31,9 @@ function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent
       const text = data.toString("latin1");
       if (text === SERIAL_ENTER) {
         handshake = true;
-        if (options.autoAck !== false) queueMicrotask(() => emit(Buffer.from(SERIAL_ENTER_ACK)));
+        if (options.autoAck !== false) queueMicrotask(() => emit(Buffer.from(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), options.lineEnd ?? String.fromCharCode(10)))));
       } else if (text === SERIAL_EXIT) {
-        queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK)));
+        queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK.replace(String.fromCharCode(10), options.lineEnd ?? String.fromCharCode(10)))));
       } else if (data.subarray(0, 4).toString("latin1") === "EMTS") {
         frames.push(data);
         const id = data.readUInt16LE(8);
@@ -181,4 +181,11 @@ test("console noise around replies is tolerated", async () => {
   await new Promise(resolve => setTimeout(resolve, 2));
   assert.deepEqual(await sending, { ok: true, result: "ok" });
   await link.stop();
+});
+test("an Arduino-style CRLF acknowledgement is accepted", async () => {
+  const peer = fakePort({ lineEnd: String.fromCharCode(13) + String.fromCharCode(10) });
+  const link = transport(peer.port);
+  assert.deepEqual(await link.start(), { ok: true, path: "COM5" }, "println sends CRLF, not a bare newline");
+  await link.stop();
+  assert.equal(peer.written.at(-1)!.toString("latin1"), SERIAL_EXIT);
 });

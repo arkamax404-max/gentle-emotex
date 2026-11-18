@@ -149,13 +149,25 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
     return next;
   }
 
+  /**
+   * Consumes one acknowledgement line. The firmware answers with Arduino's
+   * `println`, which ends in CRLF, while the transport document writes `
+`: the
+   * token is matched without its ending and the rest of the line is consumed when
+   * present, so both endings (and console noise after them) are accepted.
+   */
+  function consumeAckLine(token: string): boolean {
+    const at = buffer.indexOf(token, 0, "latin1");
+    if (at < 0) return false;
+    const newline = buffer.indexOf(String.fromCharCode(10), at + token.length);
+    buffer = newline < 0 ? buffer.subarray(at + token.length) : buffer.subarray(newline + 1);
+    return true;
+  }
+
   async function waitForHandshake(): Promise<boolean> {
     const deadline = Date.now() + replyTimeoutMs;
     while (Date.now() < deadline) {
-      if (buffer.includes(SERIAL_ENTER_ACK)) {
-        buffer = buffer.subarray(buffer.indexOf(SERIAL_ENTER_ACK) + SERIAL_ENTER_ACK.length);
-        return true;
-      }
+      if (consumeAckLine(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), ""))) return true;
       await new Promise(resolve => setTimeout(resolve, 2));
     }
     return false;
@@ -234,7 +246,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
   async function waitForExitAck(): Promise<void> {
     const deadline = Date.now() + Math.min(replyTimeoutMs, 200);
     while (Date.now() < deadline) {
-      if (buffer.includes(SERIAL_EXIT_ACK)) return;
+      if (consumeAckLine(SERIAL_EXIT_ACK.replace(String.fromCharCode(10), ""))) return;
       await new Promise(resolve => setTimeout(resolve, 2));
     }
   }
