@@ -302,7 +302,7 @@ Sections: **OUTPUTS** (terminal avatar, local simulators/desktop, D200 with its 
 
 Keyboard: arrows or `j`/`k` move, Enter or Space applies, Escape or `q` closes. The panel rebuilds every row from live state on each draw and once per second; it sends nothing, renders no destination, route or credential, and a panel failure never reaches the avatar, delivery or the prompt.
 
-Every switch goes through the same command entry point as typing it, so persistence, LED ownership claims and failure paths are identical. Values without a persisted command today — size, placement, frame, accent and the per-destination clock mode — are displayed but not editable, and the panel never writes `config.json`.
+Every output switch goes through the same command entry point as typing it, so persistence, LED ownership claims and failure paths are identical. The **CLOCK** mode is session-local: switching a destination applies live, writes nothing, and returns to the configured mode on `/reload`. **`size`, `placement`, `frame` and `accent` are global**: the panel validates the new value and writes it atomically to the user-global config of the agent directory the session runs on, preserving every unrelated key, then applies it live — a failed write leaves both the file and the running appearance untouched. LED layout keys (`outline`, `background`, `backgroundCoverage`) and the D200 key are deliberately not editable: the panel layout cannot be altered and the key only mirrors the avatar.
 
 ### Receiver-owned idle clocks after five minutes
 

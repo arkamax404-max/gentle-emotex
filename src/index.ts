@@ -8,7 +8,7 @@ import type { Config, EmoteState, ResolvedRenderer } from "./types.ts";
 import type { Renderer } from "./renderer.ts";
 import { log, setDebug } from "./log.ts";
 import { loadLayeredConfig } from "./config.ts";
-import { resolveEmoteSet, findEmoteSetDir, loadEmotesConfig, EXTENSION_NAME } from "./emotes.ts";
+import { resolveEmoteSet, findEmoteSetDir, loadEmotesConfig, agentDir, EXTENSION_NAME } from "./emotes.ts";
 import { bannerConfigCandidates, createAccentTransform, resolveAccent } from "./accent.ts";
 import type { Rgb } from "./accent.ts";
 import { KittyRenderer } from "./render_kitty.ts";
@@ -24,7 +24,8 @@ import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
-import { buildPanelModel, cycleClockMode, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
+import { buildPanelModel, cycleClockMode, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
+import { writePanelConfig } from "./config_write.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
@@ -670,6 +671,32 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  /** Apply one persisted appearance key live, right after its guarded write. */
+  function applyAppearance(key: PanelAppearanceKey, value: string | number | boolean, ctx: any): void {
+    if (key === "size") {
+      config.size = value as number;
+      animator.updateConfig(config);
+      refreshCurrentFrame();
+      return;
+    }
+    if (key === "placement") {
+      config.placement = value as Config["placement"];
+      installWidget(ctx);
+      refreshCurrentFrame();
+      return;
+    }
+    if (key === "frame") {
+      config.frame = value as boolean;
+      refreshCurrentFrame();
+      return;
+    }
+    // A new accent re-tints the frames themselves, so the set is reloaded from disk.
+    config.accent = value as Config["accent"];
+    accent = resolveAccent(config.accent);
+    loadEmoteSet(currentEmoteSet);
+    refreshCurrentFrame();
+  }
+
   /** Apply one panel item through the command entry point, so behavior never forks. */
   async function applyPanelItem(item: PanelItem, ctx: any): Promise<void> {
     if (item.kind === "clock") {
@@ -681,6 +708,19 @@ export default function (pi: ExtensionAPI) {
       await emoteHandler(`${item.output}${item.enabled ? "Off" : "On"}`, ctx);
       return;
     }
+    if (item.kind === "appearance") {
+      // Persisted for every avatar from now on, applied live right here; a failed
+      // write leaves both the file and the running appearance untouched.
+      const next = nextAppearanceValue(item.key, item.value);
+      const written = writePanelConfig(agentDir(), item.key, next);
+      if (!written.ok) {
+        ctx?.ui?.notify?.(`[${EXTENSION_NAME}] ${written.error ?? "cannot write configuration"}; appearance unchanged`, "warning");
+        return;
+      }
+      applyAppearance(item.key, next, ctx);
+      return;
+    }
+    if (item.kind !== "action") return;
     if (item.action === "demo" || item.action === "status") {
       await emoteHandler(item.action, ctx);
       return;

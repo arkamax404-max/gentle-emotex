@@ -35,8 +35,10 @@ test("a missing configuration is created with only the requested key", () => {
   const space = workspace();
   try {
     assert.equal(existsSync(space.file), false);
+    rmSync(join(space.root, "extensions"), { recursive: true, force: true });
     assert.deepEqual(writePanelConfig(space.root, "frame", false), { ok: true, error: null });
     assert.deepEqual(JSON.parse(readFileSync(space.file, "utf8")), { frame: false });
+    assert.ok(existsSync(space.file), "the extension directory is created when it is missing");
   } finally { space.cleanup(); }
 });
 

@@ -1546,3 +1546,48 @@ test("a panel clock switch is session-local and visible in the status line", asy
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a panel appearance switch persists globally through the guarded writer", async () => {
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const root = mkdtempSync(join(tmpdir(), "emote-panel-appearance-"));
+  const profile = join(root, "profile");
+  const configFile = join(profile, "extensions", "gentle-emote", "config.json");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response();
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const emote = lab.commands.get("emote");
+    const opened = emote.handler("panel", lab.ctx);
+    await flush();
+    const cancel = String.fromCharCode(27);
+    const down = `${cancel}[B`;
+    const enter = String.fromCharCode(13);
+    const keybindings = { matches: (data: string, action: string) => action === "tui.select.cancel" && data === cancel };
+    const component = lab.customCalls[0]!.factory({ requestRender() {} }, { fg: (_role: string, text: string) => text }, keybindings, lab.panelDone);
+    component.render(120);
+    // Four output rows, then size, placement and frame.
+    for (let step = 0; step < 6; step++) component.handleInput(down);
+    const selected = component.render(120).find((row: string) => row.startsWith(">"));
+    assert.ok(selected?.includes("frame on"), `the cursor reaches the frame switch: ${selected}`);
+    component.handleInput(enter);
+    await flush();
+    const written = JSON.parse(readFileSync(configFile, "utf8"));
+    assert.equal(written.frame, false, "the switch is persisted in the user-global config");
+    const rows: string[] = component.render(120);
+    assert.ok(rows.some(row => row.includes("frame off")), "the panel shows the new value immediately");
+    assert.equal(lab.notices.at(-1)?.level, undefined, "a successful write warns about nothing");
+
+    // A second press cycles it back and keeps every other key intact.
+    component.handleInput(enter);
+    await flush();
+    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).frame, true);
+    component.handleInput(cancel);
+    await opened;
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

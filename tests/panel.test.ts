@@ -72,12 +72,16 @@ test("appearance rows name the effective avatar, title and layout", () => {
   const rows = buildPanelRows(snapshot());
   assert.ok(rows.includes("APPEARANCE"));
   assert.ok(rows.includes(" avatar gentleman (auto)  title - (gentle-emotex)"));
-  assert.ok(rows.includes(" size 10  placement beside-editor  frame on  accent auto"));
+  assert.ok(rows.includes(" size 10"));
+  assert.ok(rows.includes(" placement beside-editor"));
+  assert.ok(rows.includes(" frame on"));
+  assert.ok(rows.includes(" accent auto"));
   const manual = buildPanelRows(snapshot({
     appearance: { ...snapshot().appearance, avatar: "gentleled", avatarManual: true, title: "matrix panel", frame: false },
   }));
   assert.ok(manual.includes(" avatar gentleled (manual)  title matrix panel (gentle-emotex)"));
-  assert.ok(manual.includes(" size 10  placement beside-editor  frame off  accent auto"));
+  assert.ok(manual.includes(" size 10"));
+  assert.ok(manual.includes(" frame off"), "the frame switch is reported per row");
 });
 
 test("no destination, route or credential ever reaches the rows", () => {

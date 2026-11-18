@@ -128,8 +128,27 @@ function appearanceRows(appearance: PanelAppearance): string[] {
   const title = `  title ${appearance.title ?? "-"} (${appearance.folder})`;
   return [
     `${avatar}${title}`,
-    ` size ${appearance.size}  placement ${appearance.placement}  frame ${appearance.frame ? "on" : "off"}  accent ${appearance.accent}`,
+    ` size ${appearance.size}`,
+    ` placement ${appearance.placement}`,
+    ` frame ${appearance.frame ? "on" : "off"}`,
+    ` accent ${appearance.accent}`,
   ];
+}
+
+const SIZES = [6, 8, 10, 12, 14, 16] as const;
+const ACCENT_CYCLE = ["auto", "pink", "cyan", "yellow", "green"] as const;
+
+/** The next value one appearance key cycles to; a custom value restarts the cycle. */
+export function nextAppearanceValue(key: PanelAppearanceKey, value: string | number | boolean): string | number | boolean {
+  if (key === "size") {
+    const current = typeof value === "number" ? value : Number.NaN;
+    const index = SIZES.indexOf(current as never);
+    return SIZES[(index + 1) % SIZES.length]!;
+  }
+  if (key === "placement") return value === "above-editor" ? "beside-editor" : "above-editor";
+  if (key === "frame") return value !== true;
+  const index = (ACCENT_CYCLE as readonly string[]).indexOf(String(value));
+  return ACCENT_CYCLE[(index + 1) % ACCENT_CYCLE.length]!;
 }
 
 /**
@@ -153,8 +172,19 @@ export function buildPanelModel(snapshot: PanelSnapshot): PanelRow[] {
     text: clockRow(clock),
     ...(clock.actionable ? { item: { kind: "clock" as const, index, mode: clock.mode } } : {}),
   })));
-  rows.push({ text: "STATUS" }, ...statusRows(snapshot.status).map(text => ({ text })), { text: "APPEARANCE" },
-    ...appearanceRows(snapshot.appearance).map(text => ({ text })));
+  rows.push({ text: "STATUS" }, ...statusRows(snapshot.status).map(text => ({ text })), { text: "APPEARANCE" });
+  const appearance = appearanceRows(snapshot.appearance);
+  rows.push({ text: appearance[0]! });
+  const appearanceValues: Array<[PanelAppearanceKey, string | number | boolean]> = [
+    ["size", snapshot.appearance.size],
+    ["placement", snapshot.appearance.placement],
+    ["frame", snapshot.appearance.frame],
+    ["accent", snapshot.appearance.accent],
+  ];
+  for (let index = 0; index < appearanceValues.length; index++) {
+    const [key, value] = appearanceValues[index]!;
+    rows.push({ text: appearance[index + 1]!, item: { kind: "appearance", key, value } });
+  }
   rows.push({ text: "ACTIONS" });
   for (const action of PANEL_ACTIONS) rows.push({ text: ` ${ACTION_LABELS[action]}`, item: { kind: "action", action } });
   if (!snapshot.ownsDisplays) rows.push({ text: " display ownership: unavailable in this session" });
@@ -167,9 +197,13 @@ export function buildPanelRows(snapshot: PanelSnapshot): string[] {
 }
 
 /** One actionable row of the panel; the component owns the cursor and the keys. */
+export const PANEL_APPEARANCE_KEYS = ["size", "placement", "frame", "accent"] as const;
+export type PanelAppearanceKey = (typeof PANEL_APPEARANCE_KEYS)[number];
+
 export type PanelItem =
   | { kind: "output"; output: PanelOutput; enabled: boolean }
   | { kind: "clock"; index: number; mode: PanelClockMode }
+  | { kind: "appearance"; key: PanelAppearanceKey; value: string | number | boolean }
   | { kind: "action"; action: PanelAction };
 
 /** Everything the panel can apply today without a text prompt. */

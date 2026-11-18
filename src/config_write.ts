@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 /**
  * The only appearance keys the panel may persist. This module exists so a panel
@@ -74,6 +74,9 @@ export function writePanelConfig(agentRoot: string, key: PanelConfigKey, value: 
 
   const temporary = `${file}.${process.pid}.tmp`;
   try {
+    // A fresh agent directory has no config file and may not even have the
+    // extension directory yet; creating it is safe, guessing the file is not.
+    mkdirSync(dirname(file), { recursive: true });
     writeFileSync(temporary, `${JSON.stringify({ ...current, [key]: value }, null, 2)}\n`, "utf-8");
     renameSync(temporary, file);
     return { ok: true, error: null };
