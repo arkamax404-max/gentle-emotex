@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
 /**
@@ -55,28 +56,57 @@ export function isPanelConfigKey(value: unknown): value is PanelConfigKey {
  */
 const LOCK_TIMEOUT_MS = 250;
 const LOCK_RETRY_MS = 10;
-const LOCK_STALE_MS = 5_000;
 
 /** Blocks this attempt only; total wait is bounded by LOCK_TIMEOUT_MS. */
 function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Exclusive create of a sibling lock file, with stale-lock takeover. */
-function acquireLock(lockFile: string): boolean {
+/** A lock is only ours if the file still carries the token we wrote into it. */
+function ownsLock(lockFile: string, token: string): boolean {
+  try {
+    return readFileSync(lockFile, "utf-8") === token;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the process that wrote the lock can no longer be running. */
+function ownerIsGone(lockFile: string): boolean {
+  try {
+    const [pid] = readFileSync(lockFile, "utf-8").split(":");
+    const owner = Number(pid);
+    if (!Number.isSafeInteger(owner) || owner <= 0) return false;
+    if (owner === process.pid) return false;
+    try {
+      process.kill(owner, 0);
+      return false; // alive (or not ours to signal)
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exclusive create of a sibling lock file. A lock is only taken over when its
+ * recorded owner process is provably gone; age alone is never a takeover reason,
+ * because a live writer paused for a few seconds would then be duplicated and
+ * both writers would report success while one snapshot is discarded.
+ */
+function acquireLock(lockFile: string, token: string): boolean {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
     try {
-      writeFileSync(lockFile, String(process.pid), { flag: "wx" });
+      writeFileSync(lockFile, token, { flag: "wx" });
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-      try {
-        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(lockFile);
-          continue;
-        }
-      } catch { /* the lock vanished between attempts: retry now */ }
+      if (ownerIsGone(lockFile)) {
+        try { unlinkSync(lockFile); } catch { /* someone else cleaned it */ }
+        continue;
+      }
       if (Date.now() >= deadline) return false;
       pause(LOCK_RETRY_MS);
     }
@@ -100,7 +130,8 @@ export function writePanelConfig(agentRoot: string, key: PanelConfigKey, value: 
   // rename must happen under a single exclusive lock, otherwise two sessions
   // changing different keys each rename a stale snapshot and silently discard
   // the other's choice while both report success.
-  if (!acquireLock(lockFile)) return { ok: false, error: "configuration is busy" };
+  const token = `${process.pid}:${randomUUID()}`;
+  if (!acquireLock(lockFile, token)) return { ok: false, error: "configuration is busy" };
 
   try {
     let current: Record<string, unknown> = {};
@@ -126,6 +157,10 @@ export function writePanelConfig(agentRoot: string, key: PanelConfigKey, value: 
       return { ok: false, error: "cannot write configuration" };
     }
   } finally {
-    try { unlinkSync(lockFile); } catch { /* already gone */ }
+    // Never delete a lock that is not ours: another writer may have taken over
+    // after our own process was presumed gone.
+    if (ownsLock(lockFile, token)) {
+      try { unlinkSync(lockFile); } catch { /* already gone */ }
+    }
   }
 }

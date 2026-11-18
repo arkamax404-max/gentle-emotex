@@ -122,17 +122,33 @@ test("a held lock blocks the write instead of clobbering it", () => {
   } finally { space.cleanup(); }
 });
 
-test("a stale lock is taken over so a crashed writer cannot wedge the file", () => {
+test("a lock whose owner process is gone is taken over", () => {
   const space = workspace();
   try {
     writeFileSync(space.file, JSON.stringify({ size: 10 }));
     const lock = `${space.file}.lock`;
-    writeFileSync(lock, "dead-process");
-    const old = Date.now() - 60_000;
-    utimesSync(lock, new Date(old), new Date(old));
+    writeFileSync(lock, "999999:gone");
     assert.deepEqual(writePanelConfig(space.root, "frame", true), { ok: true, error: null });
     assert.deepEqual(JSON.parse(readFileSync(space.file, "utf8")), { size: 10, frame: true });
     assert.equal(existsSync(lock), false, "the taken-over lock is released");
+  } finally { space.cleanup(); }
+});
+
+test("a live or unreadable lock is never taken over by age, and none is deleted", () => {
+  const space = workspace();
+  try {
+    writeFileSync(space.file, JSON.stringify({ size: 10 }));
+    const lock = `${space.file}.lock`;
+    writeFileSync(lock, `${process.pid}:live`);
+    const old = Date.now() - 60_000;
+    utimesSync(lock, new Date(old), new Date(old));
+    assert.equal(writePanelConfig(space.root, "frame", true).error, "configuration is busy",
+      "an old lock held by a live process is not a stale lock");
+    writeFileSync(lock, "not-a-token");
+    assert.equal(writePanelConfig(space.root, "size", 12).error, "configuration is busy",
+      "a foreign lock is never deleted");
+    assert.deepEqual(JSON.parse(readFileSync(space.file, "utf8")), { size: 10 }, "the file is untouched");
+    assert.equal(existsSync(lock), true, "the foreign lock survives");
   } finally { space.cleanup(); }
 });
 
