@@ -59,6 +59,9 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
     for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
   };
 
+  // ctx.ui.custom() support: the panel factory is captured so tests can drive it.
+  const customCalls: Array<{ factory: any; options: any }> = [];
+  let panelResolve: ((value: unknown) => void) | null = null;
   const widgets = new Container();
   const editor = new Container();
   // Same shape as Gentle Shell's float prompt: hint row, input row, blank panel row.
@@ -72,6 +75,10 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
     ui: {
       notify(message: string, level: string) { notices.push({ message, level }); },
       onTerminalInput: () => () => {},
+      custom: (factory: any, options: any) => {
+        customCalls.push({ factory, options });
+        return new Promise(resolve => { panelResolve = resolve as (value: unknown) => void; });
+      },
       setWidget: (_key: string, factory: any) => { widgets.clear(); if (factory) widgets.addChild(factory(tui, {})); },
     },
   };
@@ -86,7 +93,8 @@ export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "di
     await emit("session_shutdown", { reason: "quit" });
   };
   let shutDown = false;
-  return { emit, emitBus, busSent, busHandlers, widgets, editor, writes, notices, shutdown, commands, ctx, restore: () => {
+  const panelDone = (value: unknown) => panelResolve?.(value);
+  return { emit, emitBus, busSent, busHandlers, widgets, editor, writes, notices, shutdown, commands, ctx, customCalls, panelDone, restore: () => {
     (process.stdout as any).write = realWrite;
     if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
@@ -476,7 +484,7 @@ for (const ownership of ["idle preview", "read preview", "agent_start", "session
       } else {
         // No preceding tool-start: the error handler must claim ownership itself.
         await lab.emit("tool_execution_end", { toolName: "bash", toolCallId: "direct-error", isError: true });
-        assert.match(await status(), /activity status=error phase=thinking activeSubagents=0$/);
+        assert.match(await status(), /activity status=error phase=thinking activeSubagents=0(;|$)/);
       }
       const before = await status();
       assert.doesNotMatch(before, /PNG state=hi /);
@@ -1431,6 +1439,66 @@ test("/emote d200On <port> refuses an invalid port without changing the mirror o
     assert.equal(new OutputStateStore(profile).load(() => {}).d200, true, "the saved preference is untouched");
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bare /emote opens the panel, toggles an output and keeps every argument", async () => {
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const root = mkdtempSync(join(tmpdir(), "emote-panel-"));
+  const profile = join(root, "profile");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const emote = lab.commands.get("emote");
+    const opened = emote.handler("", lab.ctx);
+    await flush();
+    assert.equal(lab.customCalls.length, 1, "bare /emote opens exactly one overlay");
+    assert.equal(lab.customCalls[0]!.options.overlay, true, "the panel is an overlay, not an editor replacement");
+    const cancel = String.fromCharCode(27);
+    const down = `${cancel}[B`;
+    const enter = String.fromCharCode(13);
+    const keybindings = { matches: (data: string, action: string) => action === "tui.select.cancel" && data === cancel };
+    const component = lab.customCalls[0]!.factory({ requestRender() {} }, { fg: (_role: string, text: string) => text }, keybindings, lab.panelDone);
+    const rows: string[] = component.render(120);
+    for (const section of ["OUTPUTS", "CLOCK", "STATUS", "APPEARANCE", "ACTIONS"]) {
+      assert.ok(rows.some(row => row.includes(section)), `the ${section} section is present`);
+    }
+    assert.ok(rows.some(row => row.startsWith(">") && row.includes("terminal avatar")), "the cursor starts on the first switch");
+    assert.ok(component.render(20).every(row => visibleWidth(row) <= 20), "rows never overflow the requested width");
+
+    // A panel toggle goes through the command entry point, so the stored
+    // preference and every failure path are the ones already tested.
+    component.handleInput(down);
+    component.handleInput(enter);
+    await flush();
+    assert.equal(new OutputStateStore(profile).load(() => {}).debug, true, "the local switch applied localOn");
+    component.handleInput(enter);
+    await flush();
+    assert.equal(new OutputStateStore(profile).load(() => {}).debug, false, "and localOff on the second press");
+
+    component.handleInput(cancel);
+    await opened;
+
+    // `/emote panel` is the same entry point.
+    const aliased = emote.handler("panel", lab.ctx);
+    await flush();
+    assert.equal(lab.customCalls.length, 2, "the explicit panel alias opens it too");
+    lab.panelDone(null);
+    await aliased;
+
+    // Every existing argument is untouched.
+    await emote.handler("bogus-state", lab.ctx);
+    const usage = lab.notices.at(-1)!.message;
+    assert.ok(usage.startsWith("[gentle-emote] /emote <state>: "), "the usage notice keeps its shape");
+    assert.ok(usage.includes(" panel,"), "the panel is discoverable in the usage list");
+    await emote.handler("read", lab.ctx);
+    await flush();
+    await emote.handler("status", lab.ctx);
+    assert.match(lab.notices.at(-1)!.message, /PNG state=read /, "previews and status still work");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
     rmSync(root, { recursive: true, force: true });
   }
 });

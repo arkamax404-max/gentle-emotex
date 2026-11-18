@@ -7,6 +7,8 @@ import { isWorkPhase } from "./work_phase.ts";
 import { log } from "./log.ts";
 
 export interface SelectedImage { base64: string; state: string; frame: string; set: string }
+/** Read-only per-destination idle-clock truth for `/emote status`; never a destination. */
+export interface IdleClockStatus { mode: "receiver" | "silence"; local: boolean; session: boolean; remaining: number | null; carrier: boolean }
 export type FrameSink = (image: SelectedImage) => void;
 export interface DisplayActivity {
   status: "idle" | "busy" | "error";
@@ -115,6 +117,20 @@ export class ExternalDisplays {
     return count;
   }
 
+  /** Idle-clock state of every destination whose mode is not off, in configuration order. */
+  idleClockStates(): IdleClockStatus[] {
+    return this.displays.map(display => display.idleClockState()).filter((state): state is IdleClockStatus => state !== null);
+  }
+  /** How many valid destinations are loopback and how many are LAN/LED, for the panel. */
+  destinationCounts(): { local: number; lan: number } {
+    const counts = { local: 0, lan: 0 };
+    for (const display of this.displays) {
+      if (!display.enabled) continue;
+      if (display.local) counts.local++;
+      else counts.lan++;
+    }
+    return counts;
+  }
   select(image: SelectedImage): void { for (const display of this.displays) display.select(image); }
   updateActivity(activity: DisplayActivity): void { for (const display of this.displays) display.updateActivity(activity); }
   setContextUsage(percent: number | null): void { for (const display of this.displays) display.setContextUsage(percent); }
@@ -175,6 +191,8 @@ export class ExternalDisplay {
   private idleClock = new IdleClock(performance.now());
   // Freeze the selected avatar and caption for the receiver's one-time carrier.
   private clockCarrier: (SelectedImage & { title: string | null; contextBand: ContextBand }) | null = null;
+  // True once an ambient clock carrier was queued for the current idle period.
+  private clockCarrierQueued = false;
   private contextBand: ContextBand = "green";
 
   private fetcher: typeof fetch;
@@ -353,6 +371,19 @@ export class ExternalDisplay {
     if (!this.clockCarrier) this.queueLatest();
   }
 
+  /**
+   * Read-only idle-clock state for `/emote status`: configured mode, whether this
+   * sender has session identity, the remaining settled milliseconds (`null` when
+   * the activity is not settled, zero or less once the deadline elapsed) and
+   * whether an ambient carrier was queued. Mutates nothing, sends nothing and
+   * never exposes the destination.
+   */
+  idleClockState(): IdleClockStatus | null {
+    const mode = this.options?.idleClock;
+    if (!this.options || (mode !== "receiver" && mode !== "silence")) return null;
+    return { mode, local: this.local, session: this.sessionId !== null, remaining: this.idleClock.remaining(performance.now()), carrier: this.clockCarrierQueued };
+  }
+
   private isSilenced(): boolean {
     return this.options?.idleClock === "silence" && this.idleClock.isActive(performance.now());
   }
@@ -370,7 +401,7 @@ export class ExternalDisplay {
         return;
       }
       if (!this.selected) return;
-      if (!ambient) this.clockCarrier = null;
+      if (!ambient) { this.clockCarrier = null; this.clockCarrierQueued = false; }
       else this.clockCarrier ??= { ...this.selected, title: this.displayName, contextBand: this.contextBand };
       const image = this.clockCarrier
         ? { base64: this.clockCarrier.base64, state: "clock", frame: "clock.png", set: "idle-clock" }
@@ -381,6 +412,7 @@ export class ExternalDisplay {
       const key = JSON.stringify([image.base64, image.state, image.frame, image.set, this.activity, phaseElapsedSeconds, contextBand]);
       if (key === this.lastKey) return;
       this.lastKey = key;
+      if (this.clockCarrier) this.clockCarrierQueued = true;
       this.pending = { ...image, activity: { ...this.activity }, contextBand, ...(carrier === undefined ? {} : { carrier }), ...(phaseElapsedSeconds === undefined ? {} : { phaseElapsedSeconds }) };
       if (!this.active) void this.drain();
     } catch { this.warn("externalDisplay: selection failed"); }

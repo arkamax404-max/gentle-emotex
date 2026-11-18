@@ -43,7 +43,7 @@ test("status after no phase reports the coarse snapshot with no source", async (
   await withLab(async (lab) => {
     await lab.commands.get("emote").handler("status", lab.ctx);
     assert.deepEqual(lastNotice(lab), {
-      message: "[gentle-emote] status: PNG none selected yet; phase none (source: none); activity status=idle phase=idle activeSubagents=0",
+      message: "[gentle-emote] status: PNG none selected yet; phase none (source: none); activity status=idle phase=idle activeSubagents=0; idleClock off",
       level: "info",
     });
   });
@@ -154,4 +154,55 @@ test("existing commands keep their behavior alongside status", async () => {
     lab.widgets.render(100);
     assert.ok(lab.editor.render(100).join("").includes("\u{10EEEE}"), "internalOn still shows the avatar");
   });
+});
+
+test("status reports the idle-clock state of a non-off destination without exposing it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-status-clock-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    externalDisplay: { enabled: true, idleClock: "receiver", url: "http://127.0.0.1:8000/emote" },
+  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response();
+  let lab: Lab | undefined;
+  try {
+    lab = { ...(await boot(root, [])), calls: [], root };
+    await lab.commands.get("emote").handler("status", lab.ctx);
+    const message = lastNotice(lab).message;
+    assert.match(message, /; idleClock #1 mode=receiver session=yes (remaining=\d+s|not-settled|active) carrier=(yes|no)$/,
+      "the clock truth is reported per destination");
+    assert.ok(!message.includes("127.0.0.1"), "the destination is never exposed");
+    assert.ok(!message.includes("/emote"), "neither is its route");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("status names an off destination instead of staying silent about clocks", async () => {
+  await withLab(async (lab) => {
+    await lab.commands.get("emote").handler("status", lab.ctx);
+    assert.match(lastNotice(lab).message, /; idleClock off$/, "an off destination is stated, never omitted");
+  });
+});
+
+test("status separates a session without destinations from off modes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-status-nodest-"));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response();
+  let lab: Lab | undefined;
+  try {
+    // No externalDisplay block at all: the shipped default is disabled.
+    lab = { ...(await boot(root, [])), calls: [], root };
+    await lab.commands.get("emote").handler("status", lab.ctx);
+    assert.match(lastNotice(lab).message, /; idleClock no destination$/);
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

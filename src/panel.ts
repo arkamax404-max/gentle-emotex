@@ -130,21 +130,53 @@ function appearanceRows(appearance: PanelAppearance): string[] {
   ];
 }
 
-/** The complete panel body, one entry per row; the component pads and themes it. */
-export function buildPanelRows(snapshot: PanelSnapshot): string[] {
+/**
+ * The complete panel body with its actionable rows. `buildPanelRows` is the
+ * text-only projection, so the rows stay testable without a cursor.
+ */
+export function buildPanelModel(snapshot: PanelSnapshot): PanelRow[] {
   if (!snapshot.enabled) {
     return [
-      " emote extension disabled in configuration",
-      ' set "enabled": true to manage the avatar and its outputs',
+      { text: " emote extension disabled in configuration" },
+      { text: ' set "enabled": true to manage the avatar and its outputs' },
     ];
   }
-  const rows = ["OUTPUTS", ...snapshot.outputs.map(outputRow), "CLOCK"];
-  if (snapshot.clocks.length === 0) rows.push(" clock: no destination");
-  else rows.push(...snapshot.clocks.map(clockRow));
-  rows.push("STATUS", ...statusRows(snapshot.status), "APPEARANCE", ...appearanceRows(snapshot.appearance));
-  if (!snapshot.ownsDisplays) rows.push(" display ownership: unavailable in this session");
+  const rows: PanelRow[] = [{ text: "OUTPUTS" }];
+  for (const row of snapshot.outputs) {
+    rows.push({ text: outputRow(row), item: { kind: "output", output: row.output, enabled: row.enabled } });
+  }
+  rows.push({ text: "CLOCK" });
+  if (snapshot.clocks.length === 0) rows.push({ text: " clock: no destination" });
+  else rows.push(...snapshot.clocks.map(clock => ({ text: clockRow(clock) })));
+  rows.push({ text: "STATUS" }, ...statusRows(snapshot.status).map(text => ({ text })), { text: "APPEARANCE" },
+    ...appearanceRows(snapshot.appearance).map(text => ({ text })));
+  rows.push({ text: "ACTIONS" });
+  for (const action of PANEL_ACTIONS) rows.push({ text: ` ${ACTION_LABELS[action]}`, item: { kind: "action", action } });
+  if (!snapshot.ownsDisplays) rows.push({ text: " display ownership: unavailable in this session" });
   return rows;
 }
+
+/** Text-only projection of the panel body, kept for the row tests and simple callers. */
+export function buildPanelRows(snapshot: PanelSnapshot): string[] {
+  return buildPanelModel(snapshot).map(row => row.text);
+}
+
+/** One actionable row of the panel; the component owns the cursor and the keys. */
+export type PanelItem =
+  | { kind: "output"; output: PanelOutput; enabled: boolean }
+  | { kind: "action"; action: PanelAction };
+
+/** Everything the panel can apply today without a text prompt. */
+export const PANEL_ACTIONS = ["avatar", "demo", "status"] as const;
+export type PanelAction = (typeof PANEL_ACTIONS)[number];
+
+export interface PanelRow { text: string; item?: PanelItem }
+
+const ACTION_LABELS = {
+  avatar: "cycle avatar set",
+  demo: "play demo",
+  status: "print status",
+} satisfies Record<PanelAction, string>;
 
 /** Rows that change when the user cycles a control; the component uses them as anchors. */
 export function panelSections(rows: string[]): string[] {

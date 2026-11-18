@@ -1,6 +1,8 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { ExternalDisplay, ExternalDisplays, normalizeExternalDisplay, type DisplayActivity } from "../src/external_display.ts";
+import { DisplayActivityTracker } from "../src/display_activity.ts";
+import { IdleClock, IDLE_CLOCK_DELAY_MS } from "../src/idle_clock.ts";
 import { createD200Display } from "../src/d200_display.ts";
 import { encodePng, decodePng } from "../src/png.ts";
 import { prepareDisplayImage } from "../src/display_image.ts";
@@ -132,10 +134,45 @@ test("receiver pending carrier is replaced by latest busy image; disposal aborts
   } finally { sender.dispose(); for (const done of release) done(); }
 });
 
-test("busy/error, active subagents, detailed work and explicit previews reset eligibility", async t => {
+test("post-error idle settles like idle: a failed turn no longer blocks the clock", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+  // The real tracker feeds the sender exactly what the extension reports at
+  // agent_end after a failed tool: reset to idle, then the terminal error status.
+  const tracker = new DisplayActivityTracker(activity => sender.updateActivity(activity));
+  try {
+    sender.select(frame("grandma.png", "grandma"));
+    tracker.set("busy", "thinking");
+    tracker.toolStart("read", "r1");
+    tracker.toolEnd("r1", true);
+    tracker.reset();
+    tracker.set("error", "idle");
+    sender.select(frame("grandma.png", "grandma"));
+    await flush();
+    await advance(300000);
+    assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), "the strict five-minute boundary is unchanged");
+    await advance(1000);
+    const carrier = calls.at(-1)!;
+    assert.equal(headers(carrier).get("X-Emote-State"), "clock");
+    assert.equal(headers(carrier).get("X-Emote-Frame"), "clock.png");
+    assert.equal(headers(carrier).get("X-Emote-Set"), "idle-clock");
+    assert.equal(headers(carrier).get("X-Emote-Status"), "error", "the settled error status is reported truthfully");
+
+    // A worker started from that post-error idle still owns the display after the
+    // clock: the red SUBAGENTS/RUNNING state is never replaced by a clock face.
+    tracker.setNativeSubagents(1);
+    sender.select(frame("idle.png"));
+    await flush();
+    const count = calls.length;
+    await advance(600000);
+    assert.ok(calls.slice(count).every(call => headers(call).get("X-Emote-State") !== "clock"), "running work blocks the clock after an error too");
+  } finally { sender.dispose(); }
+});
+
+test("busy/error during work, active subagents, detailed work and explicit previews reset eligibility", async t => {
   const advance = virtualTime(t);
   for (const blocked of [
-    { activity: { ...idle, status: "error" as const } },
+    { activity: { ...idle, status: "error" as const, phase: "waiting" as const } },
     { activity: busy }, { activity: { ...idle, phase: "waiting" as const } },
     { activity: { ...idle, activeSubagents: 1 } }, { activity: { ...idle, workPhase: "planning" as const } },
     { activity: idle, state: "bye" },
@@ -227,4 +264,24 @@ test("idleClock strictly validates modes and invalid targets consume no requests
     try { assert.equal(sender.enabled, false); sender.select(frame()); await flush(); assert.equal(calls.length, 0); assert.deepEqual(warnings, ["externalDisplay: invalid configuration; disabled"]); }
     finally { sender.dispose(); }
   }
+});
+
+test("remaining() reports the settled deadline without mutating eligibility", () => {
+  const clock = new IdleClock(0);
+  assert.equal(clock.remaining(0), IDLE_CLOCK_DELAY_MS, "a fresh sender starts with the full budget");
+  assert.equal(clock.isActive(0), false);
+  clock.update(idle, 0);
+  assert.equal(clock.remaining(299999), 1);
+  assert.equal(clock.remaining(300000), 0);
+  assert.equal(clock.isActive(300000), false, "exactly five minutes is still ordinary");
+  assert.equal(clock.remaining(301000), -1000);
+  assert.equal(clock.isActive(301000), true);
+  clock.update({ ...idle, status: "error" }, 400000);
+  assert.equal(clock.remaining(400000), -100000, "a settled error never restarts the continuous budget");
+  clock.update(busy, 500000);
+  assert.equal(clock.remaining(500000), null, "running work is not settled at all");
+  clock.update({ ...idle, status: "error" }, 600000);
+  assert.equal(clock.remaining(600000), IDLE_CLOCK_DELAY_MS, "leaving work as a settled error stamps its own moment");
+  assert.equal(clock.isActive(900000), false, "exactly five minutes after that stamp is still ordinary");
+  assert.equal(clock.isActive(900001), true);
 });

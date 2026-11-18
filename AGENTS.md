@@ -32,6 +32,12 @@ state directories or frames before loading. Checks do not lock against concurren
 Tests use isolated temporary agent directories; never alter user avatar assets to normalize layouts.
 PNG selections must remain selected for external delivery when the terminal is hidden or ASCII.
 
+## Control panel
+
+`/emote` with no argument (or `/emote panel`) opens an interactive panel built with `ctx.ui.custom()`. It stays inside this package on purpose: `gentle-shell` is a separate package installed from a pinned tag, so owning the panel here keeps upstream updates conflict-free and needs no cross-package protocol.
+
+The panel holds no state of its own. Every row is rebuilt from the extension's live truth (`src/panel.ts` is a pure view model with its own tests), every switch runs the command entry point instead of duplicating persistence or ownership logic, and nothing renders a destination, route or credential. Anything that would need a new persisted key — size, placement, frame, accent, per-destination clock mode — stays read-only until an explicit decision extends the documented "commands never rewrite `config.json`" rule.
+
 ## Configuration
 
 pi-emote uses layered configuration with deep merge. Higher-priority layers override lower ones field-by-field.

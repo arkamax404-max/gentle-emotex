@@ -22,7 +22,9 @@ import { Animator } from "./animator.ts";
 import { createWidgetFactory } from "./widget.ts";
 import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
-import { ExternalDisplay, ExternalDisplays, type SelectedImage, type FrameSink } from "./external_display.ts";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
+import { buildPanelModel, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
@@ -601,25 +603,166 @@ export default function (pi: ExtensionAPI) {
     const pngPart = png
       ? `state=${png.state} frame=${png.frame} set=${png.set}`
       : "none selected yet";
+    // Idle-clock truth lives in each destination sender, never in the renderer.
+    // Only non-off modes appear, positions stay anonymous and no destination,
+    // path or credential is exposed: this is the same safe-fields contract.
+    const clockDeadline = (remaining: number | null): string => {
+      if (remaining === null) return "not-settled";
+      if (remaining > 0) return `remaining=${Math.ceil(remaining / 1000)}s`;
+      return "active";
+    };
+    const clockSegment = (clock: IdleClockStatus): string =>
+      `mode=${clock.mode} session=${clock.session ? "yes" : "no"} ${clockDeadline(clock.remaining)} carrier=${clock.carrier ? "yes" : "no"}`;
+    const d200Clock = d200Display?.idleClockState() ?? null;
+    const clocks = [...(externalDisplay?.idleClockStates() ?? []), ...(d200Clock ? [d200Clock] : [])];
+    // Always report the clock truth: an absent segment would be ambiguous between
+    // an older extension, a session without destinations and modes that are off.
+    const clockPart = clocks.length > 0
+      ? `; idleClock ${clocks.map((clock, index) => `#${index + 1} ${clockSegment(clock)}`).join(" | ")}`
+      : externalDisplay?.enabled ? "; idleClock off" : "; idleClock no destination";
     ctx.ui?.notify?.(
-      `[${EXTENSION_NAME}] status: PNG ${pngPart}; phase ${phase ?? "none"} (source: ${source}); activity status=${activity.status} phase=${activity.phase} activeSubagents=${activity.activeSubagents}`,
+      `[${EXTENSION_NAME}] status: PNG ${pngPart}; phase ${phase ?? "none"} (source: ${source}); activity status=${activity.status} phase=${activity.phase} activeSubagents=${activity.activeSubagents}${clockPart}`,
       "info",
     );
   }
 
-  pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
-    getArgumentCompletions: (prefix: string) => {
-      const choices = prefix.trimStart().startsWith("avatar ")
-        ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
-        : [...EMOTE_STATES, "demo", "status", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])];
-      return choices.filter(name => name.startsWith(prefix.trim()))
-        .map(name => ({ value: name, label: name, description: name.startsWith("avatar ") ? EMOTE_DESCRIPTIONS.avatar : EMOTE_DESCRIPTIONS[name] }));
-    },
-    handler: async (args: string, ctx: any) => {
+  /** Panel snapshot: preferences, capabilities and live status, never a destination. */
+  function buildPanelSnapshot(): PanelSnapshot {
+    const stored = outputState.load(() => {});
+    const counts = externalDisplay?.destinationCounts() ?? { local: 0, lan: 0 };
+    const d200Live = d200Display?.enabled === true;
+    const clocks: PanelClockRow[] = [];
+    for (const state of externalDisplay?.idleClockStates() ?? []) {
+      clocks.push({ label: state.local ? "local" : "lan", mode: state.mode, session: state.session, remaining: state.remaining, carrier: state.carrier });
+    }
+    const d200Clock = d200Display?.idleClockState() ?? null;
+    if (d200Clock) clocks.push({ label: "d200", mode: d200Clock.mode, session: d200Clock.session, remaining: d200Clock.remaining, carrier: d200Clock.carrier });
+    const native = workPhase.current();
+    const phase = native ?? directWorkPhase;
+    return {
+      enabled: config.enabled,
+      ownsDisplays: ownsSharedDisplays,
+      outputs: [
+        { output: "internal", enabled: stored.internal, destinations: 0 },
+        { output: "local", enabled: stored.debug, destinations: counts.local },
+        { output: "d200", enabled: d200Live, destinations: d200Live ? 1 : 0, detail: `port ${d200LivePort ?? resolveD200Port()}` },
+        { output: "display", enabled: stored.display, destinations: counts.lan },
+      ],
+      clocks,
+      appearance: {
+        avatar: currentEmoteSet,
+        avatarManual: manualAvatar !== null,
+        title: projectTitle,
+        folder: typeof cwd === "string" ? basename(cwd) : "-",
+        size: config.size,
+        placement: config.placement,
+        frame: config.frame,
+        accent: config.accent,
+      },
+      status: {
+        ...displayActivity.snapshot(),
+        workPhase: phase,
+        workPhaseSource: native ? "native" : directWorkPhase ? "direct" : "none",
+        png: lastSelected,
+      },
+    };
+  }
+
+  /** Apply one panel item through the command entry point, so behavior never forks. */
+  async function applyPanelItem(item: PanelItem, ctx: any): Promise<void> {
+    if (item.kind === "output") {
+      await emoteHandler(`${item.output}${item.enabled ? "Off" : "On"}`, ctx);
+      return;
+    }
+    if (item.action === "demo" || item.action === "status") {
+      await emoteHandler(item.action, ctx);
+      return;
+    }
+    const names = avatarNames(extDir, cwd);
+    if (names.length === 0) return;
+    const current = manualAvatar ?? currentEmoteSet;
+    const index = names.indexOf(current);
+    await emoteHandler(`avatar ${names[(index + 1) % names.length]!}`, ctx);
+  }
+
+  /**
+   * Interactive control panel: one entry point for every switch, rebuilt from the
+   * extension's live truth on each render. It owns no state beyond its cursor, and
+   * a failure never reaches the avatar, delivery or the prompt.
+   */
+  async function showPanel(ctx: any): Promise<void> {
+    const custom = ctx?.ui?.custom;
+    if (typeof custom !== "function" || (ctx?.mode !== undefined && ctx.mode !== "tui")) {
+      ctx?.ui?.notify?.(`[${EXTENSION_NAME}] the control panel needs the interactive TUI`, "info");
+      return;
+    }
+    const ESC = String.fromCharCode(27);
+    const up = `${ESC}[A`, down = `${ESC}[B`;
+    const enter = String.fromCharCode(13);
+    let cursor = 0;
+    let applying = false;
+    try {
+      await custom((tui: any, _theme: any, keybindings: any, done: (value: null) => void) => {
+        const model = () => buildPanelModel(buildPanelSnapshot());
+        const positions = (): number[] => model().reduce<number[]>((acc, row, index) => (row.item ? [...acc, index] : acc), []);
+        const move = (delta: number): void => {
+          const reachable = positions();
+          if (reachable.length === 0) return;
+          const current = reachable.indexOf(cursor);
+          cursor = reachable[(current < 0 ? 0 : current + delta + reachable.length) % reachable.length]!;
+          tui?.requestRender?.();
+        };
+        const activate = (): void => {
+          const item = model()[cursor]?.item;
+          if (!item || applying) return;
+          applying = true;
+          void applyPanelItem(item, ctx).finally(() => {
+            applying = false;
+            tui?.requestRender?.();
+          });
+        };
+        // The status section must tick while the panel is open; unref keeps the
+        // process free to exit and dispose clears it with the overlay.
+        const ticker = setInterval(() => tui?.requestRender?.(), 1000);
+        ticker.unref?.();
+        return {
+          render(width: number): string[] {
+            const rows = model();
+            const reachable = positions();
+            if (reachable.length > 0 && !reachable.includes(cursor)) cursor = reachable[0]!;
+            return rows.map((row, index) => {
+              const marker = row.item ? (index === cursor ? ">" : " ") : " ";
+              return truncateToWidth(`${marker}${row.text}`, width);
+            });
+          },
+          handleInput(data: string): void {
+            if (keybindings?.matches?.(data, "tui.select.cancel") || data === "q" || data === "Q") { done(null); return; }
+            if (data === up || data === "k" || keybindings?.matches?.(data, "tui.select.up")) { move(-1); return; }
+            if (data === down || data === "j" || keybindings?.matches?.(data, "tui.select.down")) { move(1); return; }
+            if (data === enter || data === " " || keybindings?.matches?.(data, "tui.select.confirm")) activate();
+          },
+          invalidate() {},
+          dispose() {
+            clearInterval(ticker);
+          },
+        };
+      }, { overlay: true, overlayOptions: { anchor: "center", width: "70%", minWidth: 60, maxHeight: "85%" } });
+    } catch { /* a panel failure never reaches the avatar or delivery */ }
+  }
+
+  /**
+   * One entry point for the command line and for the panel, so a toggle from
+   * either side persists, applies and fails exactly the same way.
+   */
+  async function emoteHandler(args: string, ctx: any): Promise<void> {
       const name = args.trim();
       if (!widgetActive) {
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar inactive (no UI or disabled)`, "warning");
+        return;
+      }
+      // Bare `/emote` opens the panel; every explicit argument keeps its behavior.
+      if (name === "" || name === "panel") {
+        await showPanel(ctx);
         return;
       }
       if (name === "avatar" || name.startsWith("avatar ")) {
@@ -774,8 +917,19 @@ export default function (pi: ExtensionAPI) {
         previewState(name as EmoteState);
         return;
       }
-      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
+  }
+
+  pi.registerCommand?.("emote", {
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
+    getArgumentCompletions: (prefix: string) => {
+      const choices = prefix.trimStart().startsWith("avatar ")
+        ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
+        : [...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])];
+      return choices.filter(name => name.startsWith(prefix.trim()))
+        .map(name => ({ value: name, label: name, description: name.startsWith("avatar ") ? EMOTE_DESCRIPTIONS.avatar : EMOTE_DESCRIPTIONS[name] }));
     },
+    handler: emoteHandler,
   });
 
   loadEmoteSet(currentEmoteSet);
