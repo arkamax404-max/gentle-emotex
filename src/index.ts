@@ -22,7 +22,6 @@ import { Animator } from "./animator.ts";
 import { createWidgetFactory } from "./widget.ts";
 import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
-import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
 import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
@@ -297,12 +296,13 @@ export default function (pi: ExtensionAPI) {
     const targets = [externalDisplay, d200Display].filter(
       (display): display is ExternalDisplay => display?.enabled === true,
     );
-    if (targets.length === 0 && renderer instanceof MirroredAsciiRenderer) return null;
-    const usb = usbDisplay;
+    // The usb link is started later by its command, so it must be read at call
+    // time: capturing it here froze the sink with "off" for the whole session.
+    if (targets.length === 0 && usbDisplay === null && renderer instanceof MirroredAsciiRenderer) return null;
     return (image: SelectedImage) => {
       lastSelected = { state: image.state, frame: image.frame, set: image.set };
       for (const display of targets) display.select(image);
-      if (usb) {
+      if (usbDisplay) {
         usbPending = { base64: image.base64, state: image.state };
         pumpUsb();
       }
@@ -340,6 +340,8 @@ export default function (pi: ExtensionAPI) {
     usbPort = started.path;
     void link.sendControl("claim");
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
+    // The sink only runs when a frame is selected, so push the current one now.
+    refreshCurrentFrame();
     return true;
   }
 

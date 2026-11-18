@@ -7,6 +7,7 @@ import { join, basename } from "node:path";
 import { OutputStateStore, OUTPUTS } from "../src/output_state.ts";
 import { decodePng, encodePng } from "../src/png.ts";
 import { useSerialSystemDeps } from "../src/serial_display.ts";
+import { crc32 } from "node:zlib";
 
 const PLACEHOLDER = "\u{10EEEE}";
 const SESSION_ID = "integration-session";
