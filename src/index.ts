@@ -340,7 +340,10 @@ export default function (pi: ExtensionAPI) {
     usbPort = started.path;
     void link.sendControl("claim");
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
-    // The sink only runs when a frame is selected, so push the current one now.
+    // `displayOn`/`displayOff` govern the HTTP destinations only: the serial link
+    // must deliver with every HTTP output off. When no HTTP target existed at
+    // session start the renderer kept no sink at all, so it is registered here.
+    renderer.setFrameSink?.(frameSink());
     refreshCurrentFrame();
     return true;
   }
