@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildPanelModel,
   buildPanelRows,
   clockDeadline,
   cycleClockMode,
@@ -109,4 +110,13 @@ test("clock mode cycles off to receiver to silence and back", () => {
   assert.equal(cycleClockMode("receiver"), "silence");
   assert.equal(cycleClockMode("silence"), "off");
   assert.equal(cycleClockMode("unknown" as never), "off", "an unknown value falls back to off");
+});
+test("only destinations the panel may switch carry a clock item", () => {
+  const model = buildPanelModel(snapshot({ clocks: [
+    { label: "local", mode: "off", session: true, remaining: null, carrier: false, actionable: true },
+    { label: "d200", mode: "receiver", session: true, remaining: 5_000, carrier: false },
+  ] }));
+  const clockRows = model.filter(row => row.text.startsWith(" local  ") || row.text.startsWith(" d200"));
+  assert.deepEqual(clockRows[0]!.item, { kind: "clock", index: 0, mode: "off" }, "a switchable destination carries its index and mode");
+  assert.equal(clockRows[1]!.item, undefined, "the D200 key is reported but never switched from the panel");
 });

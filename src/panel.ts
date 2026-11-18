@@ -34,6 +34,8 @@ export interface PanelClockRow {
   /** Milliseconds left on the settled deadline; null when not settled. */
   remaining: number | null;
   carrier: boolean;
+  /** True when the panel may cycle this destination's mode (session-local). */
+  actionable?: boolean;
 }
 
 export interface PanelAppearance {
@@ -147,7 +149,10 @@ export function buildPanelModel(snapshot: PanelSnapshot): PanelRow[] {
   }
   rows.push({ text: "CLOCK" });
   if (snapshot.clocks.length === 0) rows.push({ text: " clock: no destination" });
-  else rows.push(...snapshot.clocks.map(clock => ({ text: clockRow(clock) })));
+  else rows.push(...snapshot.clocks.map((clock, index) => ({
+    text: clockRow(clock),
+    ...(clock.actionable ? { item: { kind: "clock" as const, index, mode: clock.mode } } : {}),
+  })));
   rows.push({ text: "STATUS" }, ...statusRows(snapshot.status).map(text => ({ text })), { text: "APPEARANCE" },
     ...appearanceRows(snapshot.appearance).map(text => ({ text })));
   rows.push({ text: "ACTIONS" });
@@ -164,6 +169,7 @@ export function buildPanelRows(snapshot: PanelSnapshot): string[] {
 /** One actionable row of the panel; the component owns the cursor and the keys. */
 export type PanelItem =
   | { kind: "output"; output: PanelOutput; enabled: boolean }
+  | { kind: "clock"; index: number; mode: PanelClockMode }
   | { kind: "action"; action: PanelAction };
 
 /** Everything the panel can apply today without a text prompt. */

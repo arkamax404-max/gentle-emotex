@@ -1502,3 +1502,47 @@ test("bare /emote opens the panel, toggles an output and keeps every argument", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a panel clock switch is session-local and visible in the status line", async () => {
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const root = mkdtempSync(join(tmpdir(), "emote-panel-clock-"));
+  const profile = join(root, "profile");
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote" },
+  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response();
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const emote = lab.commands.get("emote");
+    const opened = emote.handler("panel", lab.ctx);
+    await flush();
+    const cancel = String.fromCharCode(27);
+    const down = `${cancel}[B`;
+    const enter = String.fromCharCode(13);
+    const keybindings = { matches: (data: string, action: string) => action === "tui.select.cancel" && data === cancel };
+    const component = lab.customCalls[0]!.factory({ requestRender() {} }, { fg: (_role: string, text: string) => text }, keybindings, lab.panelDone);
+    // The panel is drawn before any input, which seats the cursor on the first
+    // actionable row; from there four steps reach the first clock destination.
+    component.render(120);
+    for (let step = 0; step < 4; step++) component.handleInput(down);
+    const selected = component.render(120).find((row: string) => row.startsWith(">"));
+    assert.ok(selected?.includes("local"), `the cursor reaches the clock destination: ${selected}`);
+    component.handleInput(enter);
+    await flush();
+    await emote.handler("status", lab.ctx);
+    assert.match(lab.notices.at(-1)!.message, /idleClock #1 mode=receiver/, "the session-local switch is live");
+    assert.equal(existsSync(join(dir, "config.json")) && readFileSync(join(dir, "config.json"), "utf8").includes("idleClock"), false,
+      "the switch never writes configuration");
+    component.handleInput(cancel);
+    await opened;
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

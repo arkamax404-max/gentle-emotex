@@ -117,6 +117,26 @@ export class ExternalDisplays {
     return count;
   }
 
+  /** Valid destinations in configuration order; the panel's stable clock indices. */
+  private validDisplays(): ExternalDisplay[] {
+    return this.displays.filter(display => display.enabled);
+  }
+
+  /** One panel row per valid destination, off modes included. */
+  clockRows(): Array<{ label: "local" | "lan"; mode: "off" | "receiver" | "silence"; session: boolean; remaining: number | null; carrier: boolean }> {
+    const rows: Array<{ label: "local" | "lan"; mode: "off" | "receiver" | "silence"; session: boolean; remaining: number | null; carrier: boolean }> = [];
+    for (const display of this.validDisplays()) {
+      const row = display.clockRow();
+      if (row) rows.push(row);
+    }
+    return rows;
+  }
+
+  /** Session-local clock mode for one destination; an unknown index is a no-op. */
+  setClockMode(index: number, mode: "off" | "receiver" | "silence"): void {
+    this.validDisplays()[index]?.setIdleClockMode(mode);
+  }
+
   /** Idle-clock state of every destination whose mode is not off, in configuration order. */
   idleClockStates(): IdleClockStatus[] {
     return this.displays.map(display => display.idleClockState()).filter((state): state is IdleClockStatus => state !== null);
@@ -382,6 +402,37 @@ export class ExternalDisplay {
     const mode = this.options?.idleClock;
     if (!this.options || (mode !== "receiver" && mode !== "silence")) return null;
     return { mode, local: this.local, session: this.sessionId !== null, remaining: this.idleClock.remaining(performance.now()), carrier: this.clockCarrierQueued };
+  }
+
+  /** The live clock mode of this destination; an omitted mode reads as off. */
+  idleClockMode(): "off" | "receiver" | "silence" {
+    return this.options?.idleClock ?? "off";
+  }
+
+  /**
+   * Session-local clock mode override: applied right away and written nowhere,
+   * so a reload returns to the configured mode. An out-of-range or disabled
+   * sender is never created here, so nothing can throw.
+   */
+  setIdleClockMode(mode: "off" | "receiver" | "silence"): void {
+    if (!this.options || this.disposed || this.options.idleClock === mode) return;
+    this.options.idleClock = mode;
+    this.clockCarrier = null;
+    this.clockCarrierQueued = false;
+    this.lastKey = "";
+    this.queueLatest();
+  }
+
+  /** One panel row for this destination, including its off mode. */
+  clockRow(): { label: "local" | "lan"; mode: "off" | "receiver" | "silence"; session: boolean; remaining: number | null; carrier: boolean } | null {
+    if (!this.options) return null;
+    return {
+      label: this.local ? "local" : "lan",
+      mode: this.idleClockMode(),
+      session: this.sessionId !== null,
+      remaining: this.idleClock.remaining(performance.now()),
+      carrier: this.clockCarrierQueued,
+    };
   }
 
   private isSilenced(): boolean {

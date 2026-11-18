@@ -285,3 +285,40 @@ test("remaining() reports the settled deadline without mutating eligibility", ()
   assert.equal(clock.isActive(900000), false, "exactly five minutes after that stamp is still ordinary");
   assert.equal(clock.isActive(900001), true);
 });
+
+test("a panel switch changes one destination's clock mode for this session only", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const group = new ExternalDisplays({ enabled: true, targets: [
+    { enabled: true, url: "http://127.0.0.1:48000/emote" },
+    { enabled: true, url: "http://matrix/emote" },
+  ] }, async (_url, init) => { calls.push(init!); return new Response(); });
+  try {
+    group.select(frame());
+    await flush();
+    assert.deepEqual(group.clockRows().map(row => [row.label, row.mode]), [["local", "off"], ["lan", "off"]],
+      "every destination is listed with its real mode, off included");
+    await advance(301000);
+    assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), "off keeps avatars past the deadline");
+
+    group.setClockMode(0, "receiver");
+    await advance(1000);
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "receiver hands the deadline off immediately");
+    assert.equal(group.clockRows()[0]!.mode, "receiver");
+    assert.equal(group.clockRows()[1]!.mode, "off", "only the named destination changed");
+
+    group.setClockMode(0, "off");
+    await advance(1000);
+    assert.notEqual(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "switching back restores the avatar");
+    assert.equal(group.clockRows()[0]!.mode, "off");
+  } finally { group.dispose(); }
+});
+
+test("a clock mode switch never writes configuration or throws on a disabled destination", async () => {
+  const group = new ExternalDisplays({ enabled: false, url: "http://127.0.0.1:48000/emote" }, async () => new Response());
+  try {
+    assert.deepEqual(group.clockRows(), [], "a disabled configuration has no destinations to report");
+    group.setClockMode(0, "receiver");
+    group.setClockMode(9, "off");
+    assert.deepEqual(group.clockRows(), [], "an out-of-range index is a no-op");
+  } finally { group.dispose(); }
+});

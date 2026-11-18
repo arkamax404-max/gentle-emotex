@@ -24,7 +24,7 @@ import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
-import { buildPanelModel, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
+import { buildPanelModel, cycleClockMode, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
 import { DisplayActivityTracker } from "./display_activity.ts";
@@ -632,8 +632,10 @@ export default function (pi: ExtensionAPI) {
     const counts = externalDisplay?.destinationCounts() ?? { local: 0, lan: 0 };
     const d200Live = d200Display?.enabled === true;
     const clocks: PanelClockRow[] = [];
-    for (const state of externalDisplay?.idleClockStates() ?? []) {
-      clocks.push({ label: state.local ? "local" : "lan", mode: state.mode, session: state.session, remaining: state.remaining, carrier: state.carrier });
+    // Every valid destination is listed, off included, so the panel can switch it;
+    // the indices stay aligned with ExternalDisplays.clockRows()/setClockMode().
+    for (const row of externalDisplay?.clockRows() ?? []) {
+      clocks.push({ ...row, actionable: true });
     }
     const d200Clock = d200Display?.idleClockState() ?? null;
     if (d200Clock) clocks.push({ label: "d200", mode: d200Clock.mode, session: d200Clock.session, remaining: d200Clock.remaining, carrier: d200Clock.carrier });
@@ -670,6 +672,11 @@ export default function (pi: ExtensionAPI) {
 
   /** Apply one panel item through the command entry point, so behavior never forks. */
   async function applyPanelItem(item: PanelItem, ctx: any): Promise<void> {
+    if (item.kind === "clock") {
+      // Session-local: applied live, written nowhere, gone after a reload.
+      externalDisplay?.setClockMode(item.index, cycleClockMode(item.mode));
+      return;
+    }
     if (item.kind === "output") {
       await emoteHandler(`${item.output}${item.enabled ? "Off" : "On"}`, ctx);
       return;
@@ -894,7 +901,9 @@ export default function (pi: ExtensionAPI) {
         // text is trimmed and validated with the sender's project-name rules.
         const text = name.slice("title".length).trim();
         const next = text === "" ? null : normalizeTitle(text);
-        if (text !== "" && next === undefined) {
+        // An empty argument restores the folder name (null); only a present but
+        // unparseable one is rejected. Narrowing here keeps both cases explicit.
+        if (next === undefined) {
           ctx.ui?.notify?.(`[${EXTENSION_NAME}] invalid title; the display title is unchanged`, "warning");
           return;
         }
@@ -1131,14 +1140,18 @@ export default function (pi: ExtensionAPI) {
     if (!widgetActive) return;
     // A successful explicit phase call is adopted before the post-tool scene so
     // the outgoing frame and headers already wear the named phase.
-    if (event.toolName === PHASE_TOOL) adoptDirectPhase(event.args, event.isError);
+    // `tool_execution_end` carries the call arguments at runtime on hosts that
+    // include them, but the shipped event type does not declare the field, so it
+    // is read defensively instead of pretending it exists.
+    const args = (event as { args?: unknown }).args;
+    if (event.toolName === PHASE_TOOL) adoptDirectPhase(args, event.isError);
     displayActivity.toolEnd(event.toolCallId, event.isError);
     if (farewell) return;
     if (event.isError) {
       cancelGreeting();
       runHadError = true;
       animator.setHoldNextState("think");
-      const scene = toolNameToState(event.toolName, event.args);
+      const scene = toolNameToState(event.toolName, args);
       if (scene !== "verify" || !animator.showFailureFrame("verify", "fail.png")) animator.transitionTo("failure");
     } else if (!ASK_TOOLS.has(event.toolName) && !STICKY_TOOL_STATES.has(toolNameToState(event.toolName))) {
       show("read");
@@ -1201,7 +1214,9 @@ export default function (pi: ExtensionAPI) {
   // turn_end runs after persisted assistant/tool messages; also refresh when
   // navigating history or when compaction fails without a success event.
   for (const event of ["turn_start", "turn_end", "session_tree", "session_switch", "session_compact_failed"] as const) {
-    pi.on(event, async (_event, ctx) => {
+    // One overload is selected for all of them: the host dispatches by the runtime
+    // name, and every branch here only refreshes the context usage.
+    pi.on(event as "turn_start", async (_event, ctx) => {
       if (widgetActive) refreshContextUsage(ctx);
     });
   }
