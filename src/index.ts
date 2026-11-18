@@ -213,6 +213,8 @@ export default function (pi: ExtensionAPI) {
   /** Where to report a rejected serial frame, and the last error already shown. */
   let usbCtx: any = null;
   let usbWarned: string | null = null;
+  /** First successful send per link, so "nothing is queued" is distinguishable. */
+  let usbSentReported = false;
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
@@ -357,6 +359,7 @@ export default function (pi: ExtensionAPI) {
     usbPort = started.path;
     usbCtx = ctx;
     usbWarned = null;
+    usbSentReported = false;
     void link.sendControl("claim");
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
     // `displayOn`/`displayOff` govern the HTTP destinations only: the serial link
@@ -376,7 +379,14 @@ export default function (pi: ExtensionAPI) {
     void usbDisplay.sendImage(image).then(result => {
       // A rejected frame used to be silent, which made a wrong payload look like a
       // working link. The firmware's own result code is reported once per change.
-      if (result.ok) { usbWarned = null; return; }
+      if (result.ok) {
+        usbWarned = null;
+        if (!usbSentReported) {
+          usbSentReported = true;
+          usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb frame accepted (${image.base64.length} b64 chars)`, "info");
+        }
+        return;
+      }
       if (usbWarned === result.error) return;
       usbWarned = result.error;
       usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb frame rejected: ${result.error}`, "warning");
