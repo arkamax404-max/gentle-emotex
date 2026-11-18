@@ -1,3 +1,4 @@
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 /**
  * Pure view model and text rows for the `/emote` control panel. The host
  * component owns keyboard input, selection and theme; this module decides what
@@ -221,4 +222,20 @@ const ACTION_LABELS = {
 /** Rows that change when the user cycles a control; the component uses them as anchors. */
 export function panelSections(rows: string[]): string[] {
   return rows.filter(row => ["OUTPUTS", "CLOCK", "STATUS", "APPEARANCE"].includes(row));
+}
+/**
+ * Frames the body in a box with one cell of padding on every side and pads each
+ * row to the full width. Without that padding the terminal behind the overlay
+ * shows through between rows, which made the panel hard to read.
+ */
+export function framePanelLines(lines: string[], width: number): string[] {
+  const total = Math.max(16, Math.floor(width));
+  const inner = Math.max(1, total - 4);
+  const fit = (text: string): string => {
+    const cut = truncateToWidth(text, inner);
+    const padding = Math.max(0, inner - visibleWidth(cut));
+    return `\u2502 ${cut}${" ".repeat(padding)} \u2502`;
+  };
+  const rule = "\u2500".repeat(Math.max(0, total - 2));
+  return [`\u250c${rule}\u2510`, ...lines.map(fit), `\u2514${rule}\u2518`];
 }

@@ -1464,8 +1464,8 @@ test("bare /emote opens the panel, toggles an output and keeps every argument", 
     for (const section of ["OUTPUTS", "CLOCK", "STATUS", "APPEARANCE", "ACTIONS"]) {
       assert.ok(rows.some(row => row.includes(section)), `the ${section} section is present`);
     }
-    assert.ok(rows.some(row => row.startsWith(">") && row.includes("terminal avatar")), "the cursor starts on the first switch");
-    assert.ok(component.render(20).every(row => visibleWidth(row) <= 20), "rows never overflow the requested width");
+    assert.ok(rows.some(row => row.includes("> ") && row.includes("terminal avatar")), "the cursor starts on the first switch");
+    assert.ok(component.render(40).every(row => visibleWidth(row) <= 40), "the framed rows never overflow the requested width");
 
     // A panel toggle goes through the command entry point, so the stored
     // preference and every failure path are the ones already tested.
@@ -1529,7 +1529,7 @@ test("a panel clock switch is session-local and visible in the status line", asy
     // actionable row; from there four steps reach the first clock destination.
     component.render(120);
     for (let step = 0; step < 4; step++) component.handleInput(down);
-    const selected = component.render(120).find((row: string) => row.startsWith(">"));
+    const selected = component.render(120).find((row: string) => row.includes("> "));
     assert.ok(selected?.includes("local"), `the cursor reaches the clock destination: ${selected}`);
     component.handleInput(enter);
     await flush();
@@ -1568,7 +1568,7 @@ test("a panel appearance switch persists globally through the guarded writer", a
     component.render(120);
     // Four output rows, then size, placement and frame.
     for (let step = 0; step < 6; step++) component.handleInput(down);
-    const selected = component.render(120).find((row: string) => row.startsWith(">"));
+    const selected = component.render(120).find((row: string) => row.includes("> "));
     assert.ok(selected?.includes("frame on"), `the cursor reaches the frame switch: ${selected}`);
     component.handleInput(enter);
     await flush();

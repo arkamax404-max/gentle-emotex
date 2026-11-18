@@ -24,7 +24,7 @@ import { resolveRenderer } from "./terminal.ts";
 import { readYoloRest } from "./yolo.ts";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
-import { buildPanelModel, cycleClockMode, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
+import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { createD200Display, d200Url, parseD200Port, resolveD200Port } from "./d200_display.ts";
@@ -777,10 +777,12 @@ export default function (pi: ExtensionAPI) {
             const rows = model();
             const reachable = positions();
             if (reachable.length > 0 && !reachable.includes(cursor)) cursor = reachable[0]!;
-            return rows.map((row, index) => {
+            const lines = rows.map((row, index) => {
               const marker = row.item ? (index === cursor ? ">" : " ") : " ";
-              return truncateToWidth(`${marker}${row.text}`, width);
+              return `${marker}${row.text}`;
             });
+            lines.push(" Esc/q close  ↑↓ or j/k move  Enter apply");
+            return framePanelLines(lines, width);
           },
           handleInput(data: string): void {
             if (keybindings?.matches?.(data, "tui.select.cancel") || data === "q" || data === "Q") { done(null); return; }
