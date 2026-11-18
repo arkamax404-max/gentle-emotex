@@ -210,6 +210,9 @@ export default function (pi: ExtensionAPI) {
   let usbPort: string | null = null;
   let usbPending: { base64: string; state: string } | null = null;
   let usbBusy = false;
+  /** Where to report a rejected serial frame, and the last error already shown. */
+  let usbCtx: any = null;
+  let usbWarned: string | null = null;
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
@@ -352,6 +355,8 @@ export default function (pi: ExtensionAPI) {
     }
     usbDisplay = link;
     usbPort = started.path;
+    usbCtx = ctx;
+    usbWarned = null;
     void link.sendControl("claim");
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display: ${started.path}`, "info");
     // `displayOn`/`displayOff` govern the HTTP destinations only: the serial link
@@ -368,7 +373,14 @@ export default function (pi: ExtensionAPI) {
     const image = usbPending;
     usbPending = null;
     usbBusy = true;
-    void usbDisplay.sendImage(image).finally(() => {
+    void usbDisplay.sendImage(image).then(result => {
+      // A rejected frame used to be silent, which made a wrong payload look like a
+      // working link. The firmware's own result code is reported once per change.
+      if (result.ok) { usbWarned = null; return; }
+      if (usbWarned === result.error) return;
+      usbWarned = result.error;
+      usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb frame rejected: ${result.error}`, "warning");
+    }).finally(() => {
       usbBusy = false;
       pumpUsb();
     });
