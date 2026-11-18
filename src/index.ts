@@ -303,8 +303,22 @@ export default function (pi: ExtensionAPI) {
       lastSelected = { state: image.state, frame: image.frame, set: image.set };
       for (const display of targets) display.select(image);
       if (usbDisplay) {
-        usbPending = { base64: image.base64, state: image.state };
-        pumpUsb();
+        // The firmware validates the PNG envelope (64x64 RGBA8), exactly like the
+        // HTTP path, so the composed image is sent there too; the raw sprite is
+        // 48x40 and would be rejected with `png`.
+        try {
+          const composed = prepareDisplayImage(
+            image.base64,
+            { ...displayActivity.snapshot(), state: image.state },
+            config.externalDisplay.background,
+            config.externalDisplay.backgroundCoverage,
+            undefined,
+            config.externalDisplay.transparentBackground,
+            null,
+          );
+          usbPending = { base64: composed.toString("base64"), state: image.state };
+          pumpUsb();
+        } catch { /* a failed composition never blocks the other outputs */ }
       }
     };
   }
