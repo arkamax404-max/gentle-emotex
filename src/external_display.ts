@@ -353,12 +353,10 @@ export class ExternalDisplay {
     if (!this.focusRequest || !this.sessionId || this.disposed || this.paused || controller.signal.aborted
       || response.status !== 204) return;
     try {
-      // Require the fixed action and an exact echo of this sender's immutable
-      // session. Comma-joined duplicate values fail these checks or the ID grammar.
-      if (typeof response.headers?.get !== "function"
-        || response.headers.get("X-Emote-Action") !== "focus"
-        || response.headers.get("X-Emote-Session-Id") !== this.sessionId) return;
-      const id = response.headers.get("X-Emote-Action-Id");
+      // Identity is immutable in the requesting sender, not echoed by the receiver.
+      // Old generic action headers are deliberately ignored, even when present.
+      if (typeof response.headers?.get !== "function") return;
+      const id = response.headers.get("X-Emote-Focus-Request-Id");
       if (typeof id !== "string" || !HERDR_FOCUS_ID_PATTERN.test(id)) return;
       const generation = this.focusGeneration;
       const version = ++this.focusRequestVersion;
@@ -566,7 +564,7 @@ export class ExternalDisplay {
       let body: Buffer | undefined;
       const headers: Record<string, string> = { "X-Emote-Version": "1", "X-Emote-Stream-Id": this.streamId };
       if (this.sessionId) headers["X-Emote-Session-Id"] = this.sessionId;
-      if (this.focusRequest && this.focusAck) headers["X-Emote-Action-Ack"] = this.focusAck;
+      if (this.focusRequest && this.focusAck) headers["X-Emote-Focus-Ack"] = this.focusAck;
       if (image) {
         // Keep the same preparation and cache policy for legacy and session images.
         // The captioned layout is part of the cached bytes' identity per destination.
