@@ -4,7 +4,7 @@ Fork of pi-emote: animated pixel-art Gentleman avatar for the Pi / Gentle Shell 
 
 ## Output commands and defaults
 
-All four output groups default to off independently; keep the extension's `enabled: true` to make commands available.
+Local output (`debug` preference, `/emote localOn`) defaults on only when its saved preference is absent. Internal, D200, LED/LAN and USB default off independently. Saved booleans always win; malformed preferences fail closed. The shipped config preconfigures only `http://127.0.0.1:8001/emote` with per-target `transparentBackground: true`; parent transparency remains unset, keeping hardware opaque. User/project legacy URLs replace the shipped target preset, and explicit target arrays replace it normally. Keep the extension's `enabled: true` to make commands available.
 
 | Output | Commands | Scope |
 |--------|----------|-------|

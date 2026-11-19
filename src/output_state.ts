@@ -21,7 +21,7 @@ export class OutputStateStore {
     let text: string;
     try { text = readFileSync(this.path(output), "utf8"); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return output === "debug";
       throw error;
     }
     const value: unknown = JSON.parse(text);

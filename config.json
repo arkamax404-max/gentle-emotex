@@ -1,6 +1,13 @@
 {
   "enabled": true,
-  "externalDisplay": { "enabled": false, "url": "", "timeoutMs": 1000 },
+  "externalDisplay": {
+    "enabled": true,
+    "url": "",
+    "timeoutMs": 1000,
+    "targets": [
+      { "enabled": true, "url": "http://127.0.0.1:8001/emote", "transparentBackground": true }
+    ]
+  },
   "debug": false,
   "size": 10,
   "placement": "beside-editor",

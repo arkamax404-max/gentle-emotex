@@ -13,7 +13,7 @@
 
 A pixel-art **Gentleman** that sits in a frame to the left of your prompt and acts out what the agent is doing. Works in [Gentle Shell](https://github.com/Gentleman-Programming/gentle-shell) and [Pi](https://pi.dev).
 
-He listens to local session events: no model calls or context. Networking is off by default; optional external-display mirroring sends only avatar images and visual metadata. On top of upstream, this fork adds independent simulator/ESP32 delivery, activity labels, silhouette outlines, ASCII-terminal mirroring, the editable `gentleled` image set, per-destination transparent output and the related projects below.
+He listens to local session events: no model calls or context. Desktop mirroring to `127.0.0.1:8001` is on by default; only avatar images and visual metadata are sent. LAN, USB and D200 stay off until enabled. On top of upstream, this fork adds independent simulator/ESP32 delivery, activity labels, silhouette outlines, ASCII-terminal mirroring, the editable `gentleled` image set, per-destination transparent output and the related projects below.
 
 ## Related projects
 
@@ -26,7 +26,7 @@ Gentle Emote ships as separate repositories. Each one works on its own, and each
 | [emote-display-simulator](https://github.com/arkamax404-max/emote-display-simulator) | Browser receiver on `127.0.0.1:8000`, the quickest way to see deliveries while configuring a destination. |
 | [gentle-emote-d200](https://github.com/arkamax404-max/gentle-emote-d200) | Ulanzi D200 key plugin on `127.0.0.1:8003`: the destination added by `/emote d200On`, which mirrors the avatar frames to the key. |
 
-He listens to local session events: no model calls or context. Networking is off by default; optional external-display mirroring sends only avatar images and visual metadata.
+He listens to local session events: no model calls or context. Desktop mirroring to `127.0.0.1:8001` is on by default; only avatar images and visual metadata are sent. LAN, USB and D200 stay off until enabled.
 
 ## Scenes
 
@@ -209,7 +209,7 @@ Drop a `config.json` with only the keys you want to change in either place (the 
 
 ### Global output preferences
 
-The `internal`, `debug`, `d200` and `display` outputs are **off by default**. Each On/Off command saves its own global boolean under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Choices survive `/reload`, restarts and project changes until another command changes them. Project configuration cannot override these preferences. Already-running sessions restore them on their next session start/reload; commands change the current session immediately.
+The local output (`localOn`, saved as `debug`) is **on by default** when no preference exists. The `internal`, `d200`, `display` and `usb` outputs are **off by default**. A saved `localOff` remains off after an update; missing preferences are not written automatically. Each On/Off command saves its own global boolean under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Choices survive `/reload`, restarts and project changes until another command changes them. Project configuration cannot override these preferences. Already-running sessions restore them on their next session start/reload; commands change the current session immediately.
 
 `internalOn` / `internalOff` affect only the terminal avatar (graphics or ASCII), not the animation engine, activity tracking or other outputs. While hidden, no terminal image uploads occur. Keep the extension's `enabled: true` so the commands remain available.
 
@@ -228,6 +228,14 @@ The command requires the LED group to be enabled already: with no enabled extern
 ## Mirror to an external 64×64 display
 
 Only the main session sends images to external displays. Gentle Shell subagent sessions (`GENTLE_PI_AGENTS_CHILD=1`) do not register the extension's commands, local avatar or external senders, even when saved preferences or global/project configuration enable delivery. The main session can still show delegation scenes and its active-subagent count, but child sessions do not compete for the same display.
+
+### Desktop: ready on first install
+
+The shipped configuration enables one destination: `http://127.0.0.1:8001/emote`, with `transparentBackground: true` **on that target only**. Start [gentle-emote-desktop](https://github.com/arkamax404-max/gentle-emote-desktop) to receive the avatar without editing JSON. Canvas gaps are transparent; opaque black artwork is preserved (no chromakey). `/emote localOff` pauses local delivery and persists that choice; `/emote localOn` restores it. No receiver is installed or started automatically.
+
+Your own `externalDisplay.targets` replaces this preset. A user/project legacy `externalDisplay.url` also replaces the shipped targets, so existing receivers are not redirected to the desktop. Explicit `externalDisplay.enabled: false` still disables delivery. The preset does not enable LAN, USB or D200, nor change their default image opacity.
+
+### Other receivers
 
 With the sibling `emote-display-simulator` receiver running locally, add this to `.pi/extensions/gentle-emote/config.json` (or your global config):
 
@@ -275,7 +283,7 @@ Set `transparentBackground: true` for a receiver that supports alpha. This prese
 }
 ```
 
-The boolean defaults to `false`: existing simulator/hardware output stays opaque unless opted in. Targets inherit the parent value; an explicit `false` keeps a target opaque. Normal configuration layering applies. Other values (including `null` and strings) disable the affected destination. In transparent mode, `background` and `backgroundCoverage` have **no rendering effect**, but supplied values must still be valid. The PNG remains 64×64 and protocol v1 is unchanged; how alpha is displayed depends on the receiver. The dedicated `/emote d200On` mirror remains opaque and does not inherit this setting.
+The boolean defaults to `false`: simulator/hardware output stays opaque unless opted in. The shipped desktop target explicitly sets it to `true` without changing the parent default. Targets inherit the parent value; an explicit `false` keeps a target opaque. Normal configuration layering applies. Other values (including `null` and strings) disable the affected destination. In transparent mode, `background` and `backgroundCoverage` have **no rendering effect**, but supplied values must still be valid. The PNG remains 64×64 and protocol v1 is unchanged; how alpha is displayed depends on the receiver. The dedicated `/emote d200On` mirror remains opaque and does not inherit this setting.
 
 ### Opaque background and delivery
 
@@ -284,7 +292,7 @@ Optional `background` accepts an RGB hex color (`"#000000"` by default). It comp
 Run `/reload`, open the simulator in your browser, then `/emote localOn` and `/emote demo`. For the LED/ESP32, use `/emote displayOn`, or `/emote displayOn 192.168.1.129` to point the group at that board and save it. Stop each group with its corresponding Off command; the choice persists. Shutdown/reload aborts pending delivery, then the next session restores saved preferences.
 
 - **Trust:** project config can override destinations through the normal layered merge; saved `localOn` or `displayOn` preferences allow delivery to those enabled destinations. Review it before using this extension in a project. Use only local, trusted destinations: this iteration has no authentication; HTTP is unencrypted. Do not expose the receiver publicly. URLs must explicitly use HTTP(S), without credentials or fragments. No prompts, tool arguments, file paths, or credentials are sent. When a session identity is available, PNG requests include it for independent avatar routing.
-- **Options:** disabled by default; URL defaults to empty (no implicit destination). `timeoutMs` defaults to `1000` and must be finite between `1` and `30000` inclusive. Invalid options safely disable networking without disabling the local avatar.
+- **Options:** the shipped desktop destination is enabled by default; other receivers require explicit configuration. `timeoutMs` defaults to `1000` and must be finite between `1` and `30000` inclusive. Invalid options safely disable networking without disabling the local avatar.
 - **Image:** raw binary PNG, exactly 64×64. In avatar mode, an opaque black canvas by default, with configurable background inside the sprite bounds; `transparentBackground: true` instead preserves source RGBA on a transparent canvas. Post-accent sprites are centered without enlargement in a 48×40 viewport at the top (x=8, y=0 for native sprites), leaving the bottom 24 rows for labels embedded in the PNG: uppercase status and active subagent count (e.g. `BUSY (2)`) at y=44–48 and phase at y=54–58, centered in a native 3×5 pixel font. Status is green (idle), amber (busy), or red (error); the count and parentheses are yellow and appear only when the count is positive (zero or missing counts show the status alone), and phase is near-white light gray (`#eeeeee`). When the phase is `idle`, status is `idle` or `error`, and the active subagent count is positive, the embedded labels instead read exactly `SUBAGENTS (n)` and `RUNNING`; this is display-only, so internal status/phase and protocol headers remain unchanged; a post-error idle parent keeps red status ink. Oversized sprites shrink proportionally with nearest-neighbor sampling. Terminal borders are not mirrored. A separate cache retains at most 32 prepared avatar images.
 
 On **every image destination** (local simulator, LAN/ESP32 and the D200 key), when a project name was captured, the PNG switches to a compact captioned layout instead: the folder name rides as a green uppercase caption at y=1–5 (one blank pixel row above; centered, truncated at 16 characters, `_` and `.` drawn, accents folded — `ñ` → `N`), a clear gap at y=6–8, the same 48×40 sprite viewport at y=9–48 with any outline reserved inside that region, two separator rows at y=49–50, the status row at y=51–55, a two-pixel gap (y=56–57), the phase row at y=58–62 and a single black pixel at y=63. Phase-clock timing, colors and idle behavior are identical; only the rows move. Invalid or absent names keep the legacy uncaptioned layout on every destination. A receiver-clock carrier retains the selected avatar's caption; the receiver owns the clock's appearance. The caption is display-only: the `X-Emote-Project-Name` header keeps carrying the percent-encoded raw basename unchanged, and rides every image request — loopback/local (the simulator and the D200 key) and LAN/ESP32 alike — while never riding heartbeats or the bodyless `claim`/`release` control routes.
