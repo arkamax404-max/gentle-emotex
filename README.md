@@ -440,11 +440,22 @@ output preferences are enabled automatically.
 
 ### Desktop click → Herdr panel (E2E-4dcc832)
 
-The sender's dedicated focus headers are pinned to the actual desktop receiver
-**`4dcc832`**, whose owner reports focused tests passing. **Actual click-to-Herdr
-end-to-end/runtime verification, including the desktop's success ACK handling, is
-still pending**. Installing this sender alone does not add desktop click handling.
-It does not activate Windows Terminal or select a terminal tab.
+**Functional verification is complete for sender `babaf72` with desktop receiver
+`4dcc832` (`DEDICATED-SUCCESS-v1`).** The actual receiver → Herdr → success ACK
+round trip passed: the receiver consumed the ACK, exactly one focus process ran,
+and no repeat occurred during 20 seconds of quiet observation. The desktop owner
+relayed human confirmation that a primary click focused the correct Herdr panel,
+non-session clock/empty-space clicks were inert, and dragging moved the window
+without requesting focus. The user subsequently confirmed normal session cards
+work: “funciona perfecto”. Publication remains subject to required issue approval,
+native review and CI gates; this is not an all-tests-pass or all-versions
+compatibility claim.
+
+Installing this sender alone does not add desktop click handling. Already-running
+Pi sessions need `/reload` to use an updated on-disk checkout; no reload event was
+instrumented for the acceptance above. Saved output choices and independent output
+gates are unchanged. This feature does not activate Windows Terminal or select a
+terminal tab.
 
 Use a Herdr-managed Pi session with its captured `HERDR_ENV=1`, `HERDR_BIN_PATH`,
 `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` context, and an enabled configured loopback
