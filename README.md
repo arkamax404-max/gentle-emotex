@@ -438,6 +438,50 @@ clients with a proven close event, but this extension does not infer one. Child
 sessions remain excluded from all shared-display delivery. No destinations or
 output preferences are enabled automatically.
 
+### Desktop click → Herdr panel (proposed receiver contract)
+
+The sender supports a fixed **focus this session's Herdr panel** signal from a trusted
+local desktop receiver. **Desktop peer acceptance and live end-to-end integration
+are still pending**; installing this sender alone does not add desktop click handling.
+It does not activate Windows Terminal or select a terminal tab.
+
+Use a Herdr-managed Pi session with its captured `HERDR_ENV=1`, `HERDR_BIN_PATH`,
+`HERDR_SOCKET_PATH` and `HERDR_PANE_ID` context, and an enabled configured loopback
+`/emote` destination (no query). `/emote localOn` enables the existing delivery
+channel; the signal itself never enables any output. Missing/invalid Herdr context
+means no focus capability and no acknowledgement. Trust the configured local
+receiver: session IDs route requests, but are not authentication.
+
+| Direction | Headers / meaning |
+|-----------|-------------------|
+| Successful (2xx) frame or bodyless heartbeat response | `X-Emote-Action: focus`, `X-Emote-Action-Id: <id>`, `X-Emote-Session-Id: <the requesting Pi session ID>` |
+| Next frame or heartbeat to that same destination | `X-Emote-Action-Ack: <id>` acknowledges **accepted or duplicate receipt**, not successful panel focus |
+
+IDs contain 1–128 ASCII letters, digits or `_.:-` only (the exported
+`HERDR_FOCUS_ID_PATTERN`). The receiver must keep/coalesce a pending click **per
+session** until the matching ACK arrives; an old ACK must never clear a newer click.
+The sender retains the latest receipt per destination, not globally. A duplicate
+signal can be ACKed without executing again; one session controller shares bounded
+deduplication across configured local destinations. Focus execution is shell-free,
+limited to one running and one latest pending click, with a 2 s timeout; failures
+are not retried automatically. Receipt is not execution success.
+
+No response body is parsed (it is still canceled), and no response can choose an
+executable, pane, arguments or socket. Absent/malformed headers, foreign sessions,
+non-2xx responses, other paths and non-loopback hosts are ignored. The dedicated
+D200 mirror has **no focus capability at any port**; LAN/LED and serial outputs are
+also excluded. A configured local desktop is identified by its explicit sender
+capability, not by guessing a port. Any trusted receiver in the enabled local group
+can emit this fixed signal.
+
+Clicks arrive with the next frame, or the ordinary **5 s heartbeat** while idle
+(after the first frame); queueing/network delays can add latency. Receiver-clock
+mode keeps that heartbeat channel alive. `localOff` and ambient `idleClock: "silence"`
+intentionally stop it, so clicks cannot arrive until delivery resumes. Pause/dispose
+clears sender receipts and ignores late aborted responses. Session start captures
+fresh Herdr context and disposes old queued focus work; rebuilding destinations for
+`displayOn <address>` keeps the current session controller and deduplication history.
+
 ## Create your own avatar
 
 The Gentleman is just the default set: swap in your own character without touching the extension.
