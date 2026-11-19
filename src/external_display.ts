@@ -5,6 +5,10 @@ import { prepareDisplayImage, resolvePhaseLabel } from "./display_image.ts";
 import { IdleClock, IDLE_CLOCK_TICK_MS } from "./idle_clock.ts";
 import { isWorkPhase } from "./work_phase.ts";
 import { log } from "./log.ts";
+import { HERDR_FOCUS_ID_PATTERN, type HerdrFocusResult } from "./herdr_focus.ts";
+
+/** Explicit local-group capability, never supplied to the dedicated D200 sender. */
+export type DesktopFocusRequest = (id: string) => HerdrFocusResult;
 
 export interface SelectedImage { base64: string; state: string; frame: string; set: string }
 /** Read-only per-destination idle-clock truth for `/emote status`; never a destination. */
@@ -50,12 +54,12 @@ export function isLoopbackDisplayUrl(url: string): boolean {
 export class ExternalDisplays {
   private displays: ExternalDisplay[] = [];
 
-  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null) {
+  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null, focusRequest?: DesktopFocusRequest) {
     if (!options || typeof options !== "object") return;
     const config = options as ExternalDisplayConfig;
     if (config.enabled !== true) return;
     if (config.targets === undefined) {
-      this.displays = [new ExternalDisplay(options, fetcher, report, sessionId, projectName)];
+      this.displays = [new ExternalDisplay(options, fetcher, report, sessionId, projectName, focusRequest)];
       return;
     }
     if (!Array.isArray(config.targets) || config.targets.length > 8) {
@@ -68,6 +72,7 @@ export class ExternalDisplays {
       message => report(`destination ${index + 1}: ${message}`),
       sessionId,
       projectName,
+      focusRequest,
     ));
   }
 
@@ -166,6 +171,12 @@ export class ExternalDisplay {
   private sequence = 0n;
   // Capture identity for this sender lifetime: queued frames cannot change sessions.
   private readonly sessionId: string | null;
+  private readonly focusRequest?: DesktopFocusRequest;
+  // Confirmed success only, scoped to this destination/stream and cleared on pause.
+  private focusAck: string | null = null;
+  // HTTP may already have drained when focus completes: abort alone is insufficient.
+  private focusGeneration = 0;
+  private focusRequestVersion = 0;
   // Capture the sending project's working-directory basename for every image
   // destination: immutable per sender, never a full path. The raw basename
   // labels the captioned PNG layout on all destinations, and the percent-encoded
@@ -218,7 +229,7 @@ export class ExternalDisplay {
   private fetcher: typeof fetch;
   private report: (message: string) => void;
 
-  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null) {
+  constructor(options: unknown, fetcher: typeof fetch = fetch, report: (message: string) => void = () => {}, sessionId: string | null = null, projectName: string | null = null, focusRequest?: DesktopFocusRequest) {
     this.fetcher = fetcher;
     this.report = report;
     this.sessionId = typeof sessionId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(sessionId) ? sessionId : null;
@@ -232,6 +243,8 @@ export class ExternalDisplay {
       this.clockTimer.unref?.();
       const url = new URL(this.options.url);
       if (this.sessionId && url.pathname === "/emote" && !url.search) {
+        // Ports do not identify a desktop: require explicit capability AND loopback.
+        if (this.local && typeof focusRequest === "function") this.focusRequest = focusRequest;
         url.pathname = "/emote/heartbeat";
         this.heartbeatUrl = url.href;
         this.heartbeatTimer = setInterval(() => {
@@ -263,6 +276,8 @@ export class ExternalDisplay {
     this.phaseStartedAt = null;
     this.phaseUntimed = false;
     if (paused) {
+      this.focusGeneration++;
+      this.focusAck = null;
       this.pending = null;
       this.heartbeatPending = false;
       if (this.timer) clearTimeout(this.timer);
@@ -331,6 +346,27 @@ export class ExternalDisplay {
     } else if (!response.ok) {
       this.deliveryDiagnostic("externalDisplay: receiver rejected control request");
     }
+  }
+
+  /** Header-only signal on an accepted current-stream response; never parse content. */
+  private handleFocus(response: Response, controller: AbortController): void {
+    if (!this.focusRequest || !this.sessionId || this.disposed || this.paused || controller.signal.aborted
+      || response.status !== 204) return;
+    try {
+      // Identity is immutable in the requesting sender, not echoed by the receiver.
+      // Old generic action headers are deliberately ignored, even when present.
+      if (typeof response.headers?.get !== "function") return;
+      const id = response.headers.get("X-Emote-Focus-Request-Id");
+      if (typeof id !== "string" || !HERDR_FOCUS_ID_PATTERN.test(id)) return;
+      const generation = this.focusGeneration;
+      const version = ++this.focusRequestVersion;
+      // Never hold the HTTP queue for a subprocess. The next ordinary request
+      // picks up success, provided neither lifecycle nor latest request changed.
+      void this.focusRequest(id).then(success => {
+        if (success === true && !this.disposed && !this.paused && !controller.signal.aborted
+          && generation === this.focusGeneration && version === this.focusRequestVersion) this.focusAck = id;
+      }).catch(() => { /* optional focus failure cannot affect image delivery */ });
+    } catch { /* optional signal failures never break ordinary delivery */ }
   }
 
   private deliveryDiagnostic(message: string): void {
@@ -528,6 +564,7 @@ export class ExternalDisplay {
       let body: Buffer | undefined;
       const headers: Record<string, string> = { "X-Emote-Version": "1", "X-Emote-Stream-Id": this.streamId };
       if (this.sessionId) headers["X-Emote-Session-Id"] = this.sessionId;
+      if (this.focusRequest && this.focusAck) headers["X-Emote-Focus-Ack"] = this.focusAck;
       if (image) {
         // Keep the same preparation and cache policy for legacy and session images.
         // The captioned layout is part of the cached bytes' identity per destination.
@@ -560,6 +597,7 @@ export class ExternalDisplay {
       });
       // Do not retain or consume receiver content; release its connection/body.
       await response.body?.cancel();
+      this.handleFocus(response, controller);
       // Older PNG receivers may not implement lifecycle routes. Probe only once.
       if (heartbeat && response.status === 404) this.heartbeatUrl = null;
       else if (response.status === 409 && !this.conflictWarned) {
@@ -579,6 +617,8 @@ export class ExternalDisplay {
 
   dispose(): void {
     this.disposed = true;
+    this.focusGeneration++;
+    this.focusAck = null;
     this.controls = [];
     if (this.clockTimer) clearInterval(this.clockTimer);
     this.clockTimer = null;

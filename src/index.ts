@@ -39,6 +39,7 @@ import { OutputStateStore, OUTPUTS } from "./output_state.ts";
 import { TitleStore, normalizeTitle, encodeProjectName } from "./title_state.ts";
 import { AvatarStateStore } from "./avatar_state.ts";
 import { avatarNames, findAvatar } from "./avatar_selection.ts";
+import { createHerdrFocusController, type HerdrFocusController } from "./herdr_focus.ts";
 
 const WIDGET_KEY = "gentle-emote";
 const BANNER_POLL_MS = 2000;
@@ -204,6 +205,13 @@ export default function (pi: ExtensionAPI) {
   // A terminal UI does not establish ownership of shared displays in delegated sessions.
   const ownsSharedDisplays = process.env.GENTLE_PI_AGENTS_CHILD !== "1";
   let externalDisplay: ExternalDisplays | null = null;
+  let herdrFocus: HerdrFocusController | null = null;
+  // Capture the controller, not the mutable session variable: old senders can
+  // never redirect a late response to the next session's pane.
+  function desktopFocusRequest() {
+    const controller = herdrFocus;
+    return controller?.enabled ? (id: string) => controller.request(id) : undefined;
+  }
   let d200Display: ExternalDisplay | null = null;
   /** Explicit `/emote d200On <port>` choice: session-local, cleared by every session start. */
   let d200Port: number | null = null;
@@ -1105,7 +1113,7 @@ export default function (pi: ExtensionAPI) {
         // The named board must win even when a project layer still configures the
         // previous one: persistence records the choice, this override executes it.
         externalDisplay = ownsSharedDisplays
-          ? new ExternalDisplays(withDisplayTarget(config.externalDisplay, parsed.url as string), fetch, report, sessionId(), typeof cwd === "string" ? basename(cwd) : "")
+          ? new ExternalDisplays(withDisplayTarget(config.externalDisplay, parsed.url as string), fetch, report, sessionId(), typeof cwd === "string" ? basename(cwd) : "", desktopFocusRequest())
           : null;
         const savedStates = outputState.load(report);
         externalDisplay?.setDebugEnabled(savedStates.debug);
@@ -1251,6 +1259,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     log(`session_start: hasUI=${ctx.hasUI}`);
+    // Invalidate queued focus even when the next session has no UI or disables
+    // this extension. A same-session board rebuild does not recreate it.
+    herdrFocus?.dispose();
+    herdrFocus = null;
     if (!ctx.hasUI) return;
     // Bind identity before constructing this session's immutable delivery streams.
     ctxRef = ctx;
@@ -1263,6 +1275,7 @@ export default function (pi: ExtensionAPI) {
     animator.updateConfig(config);
     if (!config.enabled) return;
 
+    herdrFocus = createHerdrFocusController({ env: process.env, log });
     const report = (message: string) => ctx.ui.notify(`[${EXTENSION_NAME}] ${message}`, "warning");
     // The saved per-project override wins over the folder basename; a malformed
     // file warns and falls back to the folder name, preserving the file.
@@ -1275,7 +1288,7 @@ export default function (pi: ExtensionAPI) {
     externalDisplay?.dispose();
     // Never create shared-display senders in a child, even with saved On states.
     // Animation and output commands cannot bypass this ownership restriction.
-    externalDisplay = ownsSharedDisplays ? new ExternalDisplays(config.externalDisplay, fetch, report, sessionId(), projectName) : null;
+    externalDisplay = ownsSharedDisplays ? new ExternalDisplays(config.externalDisplay, fetch, report, sessionId(), projectName, desktopFocusRequest()) : null;
     externalDisplay?.setDebugEnabled(states.debug);
     externalDisplay?.setDisplayEnabled(states.display);
     d200Display?.dispose();
@@ -1337,6 +1350,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    herdrFocus?.dispose();
+    herdrFocus = null;
     cancelGreeting();
     clearPreview();
     unwatchYolo();

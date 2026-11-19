@@ -153,10 +153,19 @@ test("a NACK resends the whole frame, and a missing reply is bounded", async () 
   const silent = fakePort({ answers: ["silent", "silent", "silent"] });
   const dropping = transport(silent.port);
   await dropping.start();
-  const timedOut = await dropping.sendImage(image);
-  assert.equal(timedOut.ok, false);
-  assert.match(timedOut.error ?? "", /timeout/i);
-  assert.equal(silent.frames.length, 2, "one send plus exactly one resend, then it stops");
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Mock ports have no live OS handle to keep the unref'ed reply timers running.
+    const watchdog = new Promise<never>((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("missing-reply test deadline exceeded")), 1000);
+    });
+    const timedOut = await Promise.race([dropping.sendImage(image), watchdog]);
+    assert.equal(timedOut.ok, false);
+    assert.match(timedOut.error ?? "", /timeout/i);
+    assert.equal(silent.frames.length, 2, "one send plus exactly one resend, then it stops");
+  } finally {
+    clearTimeout(deadline);
+  }
   await dropping.stop();
 });
 
@@ -164,11 +173,20 @@ test("stop-and-wait: never two frames in flight", async () => {
   const peer = fakePort({ answers: ["silent", 0, 0] });
   const link = transport(peer.port);
   await link.start();
-  const first = link.sendImage(image);
-  const second = link.sendImage(image);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  assert.equal(peer.frames.length, 1, "the second frame waits for the first reply");
-  await Promise.all([first, second]);
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Keep the mock's silent exchange alive, but fail if production stops settling it.
+    const watchdog = new Promise<never>((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("stop-and-wait test deadline exceeded")), 1000);
+    });
+    const first = link.sendImage(image);
+    const second = link.sendImage(image);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(peer.frames.length, 1, "the second frame waits for the first reply");
+    await Promise.race([Promise.all([first, second]), watchdog]);
+  } finally {
+    clearTimeout(deadline);
+  }
   await link.stop();
 });
 
