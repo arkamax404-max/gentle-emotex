@@ -13,9 +13,9 @@ import { syncBuiltinESMExports } from "node:module";
 const options = { enabled: true, url: "http://127.0.0.1:8001/emote", timeoutMs: 1000 };
 const image = { base64: encodePng({ width: 1, height: 1, data: new Uint8Array([255, 0, 0, 255]) }).toString("base64"), state: "idle", frame: "idle.png", set: "gentleman" };
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
-const ack = (init: RequestInit) => new Headers(init.headers).get("X-Emote-Focus-Ack");
-const signalHeaders = (id = "click-1") => ({ "X-Emote-Focus-Request-Id": id });
-const response = (id = "click-1") => new Response(null, { status: 204, headers: signalHeaders(id) });
+const ack = (init: RequestInit) => new Headers(init.headers).get("X-Emote-Action-Ack");
+const signalHeaders = (id = "click-1", session = "session-A") => ({ "X-Emote-Action": "focus", "X-Emote-Action-Id": id, "X-Emote-Session-Id": session });
+const response = (id = "click-1", session = "session-A") => new Response(null, { status: 204, headers: signalHeaders(id, session) });
 const env = { HERDR_ENV: "1", HERDR_BIN_PATH: "/test/herdr", HERDR_SOCKET_PATH: "/test/socket", HERDR_PANE_ID: "pane-A" };
 const confirmed = (pane = "pane-A") => JSON.stringify({ result: { type: "agent_info", agent: { pane_id: pane, focused: true } } });
 function deferred() {
@@ -45,7 +45,7 @@ test("204 frame and heartbeat signals ACK confirmed success next request, withou
     sender.select({ ...image, frame: "next.png" }); await flush();
     assert.equal(ack(calls[2]!.init), "click-2"); assert.equal(canceled, 3);
     assert.ok(calls.every(call => call.init.redirect === "error"));
-    assert.ok(calls.every(call => new Headers(call.init.headers).get("X-Emote-Action-Ack") === null));
+    assert.ok(calls.every(call => new Headers(call.init.headers).get("X-Emote-Focus-Ack") === null));
     assert.deepEqual(calls.map(call => new Headers(call.init.headers).get("X-Emote-Sequence")), ["1", "2", "3"]);
   } finally { sender.dispose(); }
 });
@@ -82,10 +82,15 @@ test("false, thrown and rejected focus preserve image delivery and last successf
   }
 });
 
-test("old generic session/action headers, bad IDs/status/path, LAN, missing identity/capability and legacy mocks are inert", async () => {
+test("missing/wrong action or session echo, duplicate headers, bad IDs/status/path and excluded senders are inert", async () => {
+  const without = (name: string) => { const headers = new Headers(signalHeaders()); headers.delete(name); return { headers }; };
   const cases: Array<{ url?: string; session?: string | null; headers?: unknown; status?: number; capability?: boolean }> = [
-    ...["session-A", "other-session"].flatMap(session => ["focus", "exec"].map(action => ({ headers: new Headers({ "X-Emote-Action": action, "X-Emote-Action-Id": "click", "X-Emote-Session-Id": session }) }))),
-    ...["", "x".repeat(129), "a b", "a/b", "a\n", "a;cmd"].map(id => ({ headers: { get: (name: string) => name === "X-Emote-Focus-Request-Id" ? id : null } })),
+    without("X-Emote-Action"), without("X-Emote-Session-Id"), without("X-Emote-Action-Id"),
+    ...["exec", "Focus", "focus, focus"].map(action => ({ headers: new Headers({ ...signalHeaders(), "X-Emote-Action": action }) })),
+    ...["other-session", "session-a", "session-A, session-A"].map(session => ({ headers: new Headers(signalHeaders("click-1", session)) })),
+    ...["", "x".repeat(129), "a b", "a/b", "a\n", "a;cmd", "é", "click-1, click-1"].map(id => ({ headers: { get: (name: string) => name === "X-Emote-Action-Id" ? id : new Headers(signalHeaders()).get(name) } })),
+    { headers: new Headers({ "X-Emote-Focus-Request-Id": "click-1", "X-Emote-Focus-Ack": "click-1" }) },
+    { headers: new Headers({ "X-Emote-Focus-Request-Id": "click-1", "X-Emote-Action": "focus", "X-Emote-Session-Id": "session-A" }) },
     ...[199, 200, 201, 202, 205, 206, 299, 300, 404, 409, 500].map(status => ({ status })),
     { url: "http://192.168.1.10/emote" }, { url: `${options.url}?x=1` }, { url: `${options.url}/` },
     { url: "http://localhost/custom" }, { session: null }, { session: "bad session" }, { capability: false },
@@ -110,12 +115,12 @@ test("old generic session/action headers, bad IDs/status/path, LAN, missing iden
   }
 });
 
-test("dedicated header needs no session/action echo; IDs at both bounds and loopback variants work", async () => {
+test("all three generic headers with exact session echo accept ID bounds and loopback variants", async () => {
   for (const [url, id] of [["http://localhost:8003/emote", "a"], ["http://[::1]:8123/emote", "x".repeat(128)], ["http://127.8.9.10/emote", "a_.:-9"]]) {
     const calls: RequestInit[] = [], ids: string[] = [];
     const sender = new ExternalDisplays({ ...options, url }, async (_url, init) => {
       calls.push(init!);
-      return new Response(null, { status: 204, headers: { ...signalHeaders(id), "X-Emote-Action": "exec", "X-Emote-Session-Id": "foreign" } });
+      return new Response(null, { status: 204, headers: { ...signalHeaders(id), "X-Emote-Focus-Request-Id": "superseded-id" } });
     }, () => {}, "session-A", null, async id => { ids.push(id); return true; });
     try {
       sender.select(image); await flush(); sender.select({ ...image, frame: "next.png" }); await flush();
@@ -280,7 +285,7 @@ test("extension captures context once, retains dedup on board rebuild, and dispo
     const configDir = join(root, "agent", "extensions", "gentle-emote");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "config.json"), JSON.stringify({ enabled: true, accent: "pink", externalDisplay: { enabled: true, targets: [options, { ...options, url: "http://localhost:8002/emote" }] } }));
-    globalThis.fetch = async (_url, init) => { calls.push(init!); return response(id); };
+    globalThis.fetch = async (_url, init) => { calls.push(init!); return response(id, session); };
     const ctx = { hasUI: true, cwd: root, model: { id: "test" }, sessionManager: { getSessionId: () => session }, ui: { notify() {}, setWidget() {} } };
     const { default: extension } = await import("../src/index.ts");
     extension({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand: (_name: string, value: any) => { command = value; }, getThinkingLevel: () => "high" } as any);

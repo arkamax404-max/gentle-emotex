@@ -438,13 +438,13 @@ clients with a proven close event, but this extension does not infer one. Child
 sessions remain excluded from all shared-display delivery. No destinations or
 output preferences are enabled automatically.
 
-### Desktop click → Herdr panel (proposed receiver contract)
+### Desktop click → Herdr panel (GENERIC-SUCCESS-v1)
 
 The sender supports a fixed **focus this session's Herdr panel** signal from a trusted
-local desktop receiver. **Receiver implementation authorization and real receiver
-end-to-end testing are still pending**; the desktop peer is authorized to propose
-only. Installing this sender alone does not add desktop click handling. It does
-not activate Windows Terminal or select a terminal tab.
+local desktop receiver under the final agreed **GENERIC-SUCCESS-v1** contract.
+The desktop receiver implementation exists (`0d2a294`), but **actual end-to-end/runtime
+verification is still pending**. Installing this sender alone does not add desktop
+click handling. It does not activate Windows Terminal or select a terminal tab.
 
 Use a Herdr-managed Pi session with its captured `HERDR_ENV=1`, `HERDR_BIN_PATH`,
 `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` context, and an enabled configured loopback
@@ -455,11 +455,11 @@ receiver: session IDs route requests, but are not authentication.
 
 | Direction | Headers / meaning |
 |-----------|-------------------|
-| Accepted current-stream frame or bodyless heartbeat response | Exactly **204**, empty body; optional `X-Emote-Focus-Request-Id: <id>`; no action header or session echo needed |
-| Every next ordinary frame or heartbeat to that same destination, after confirmation | `X-Emote-Focus-Ack: <id>` acknowledges **successful panel focus**, never receipt or pending work |
+| Accepted current-stream frame or bodyless heartbeat response | Exactly **204**, empty body; a focus signal requires all three headers: `X-Emote-Action: focus`, `X-Emote-Action-Id: <id>` and `X-Emote-Session-Id: <exact requesting Pi session ID>` |
+| Every next ordinary frame or heartbeat to that same destination, after confirmation | `X-Emote-Action-Ack: <id>` acknowledges **successful panel focus**, never receipt or pending work |
 
 IDs contain 1–128 ASCII letters, digits or `_.:-` only (the exported
-`HERDR_FOCUS_ID_PATTERN`). The proposed receiver keeps one latest pending click
+`HERDR_FOCUS_ID_PATTERN`). The receiver keeps one latest pending click
 **per session**, using instance nonce + counter IDs without reuse and a fixed
 **15 s TTL**. Only a matching success ACK clears it; old ACKs never clear newer
 clicks. The receiver also retires pending clicks on stream retirement/takeover,
@@ -479,11 +479,13 @@ appears only on the next ordinary frame or heartbeat.
 
 No response body is parsed (it is still canceled), and no response can choose an
 executable, pane, arguments or socket. Session and stream identity come from the
-immutable request, not response echoes. Old `X-Emote-Action`, `X-Emote-Action-Id`,
-`X-Emote-Session-Id` response headers and `X-Emote-Action-Ack` are not supported;
-this unreleased protocol is not backward compatible. Missing/malformed dedicated
-IDs, **every non-204 response** (including other 2xx), other paths and non-loopback
-hosts are ignored. The dedicated
+immutable request; the response session echo must match it exactly and cannot retarget
+focus. Missing/wrong action or session echo, comma-joined duplicate values,
+missing/malformed/oversized IDs, **every non-204 response** (including other 2xx),
+other paths and non-loopback hosts are ignored. Superseded dedicated
+`X-Emote-Focus-Request-Id` / `X-Emote-Focus-Ack` headers are not supported.
+Invalid or unknown ACKs are ignored by the receiver without rejecting a valid POST.
+The dedicated
 D200 mirror has **no focus capability at any port**; LAN/LED and serial outputs are
 also excluded. A configured local desktop is identified by its explicit sender
 capability, not by guessing a port. Any trusted receiver in the enabled local group
