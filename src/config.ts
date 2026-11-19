@@ -106,6 +106,19 @@ export function loadLayeredConfig(extDir: string, cwd: string): ConfigResult {
   // Deep merge in priority order
   let merged = DEFAULTS;
   if (extConfig) merged = deepMerge(merged, extConfig);
+  // A saved legacy URL must not be shadowed by the shipped desktop preset.
+  // Explicit user/project targets still replace the preset through normal layering.
+  const customDestination = [userConfig, projectConfig].some(layer =>
+    layer?.externalDisplay && Object.hasOwn(layer.externalDisplay, "url"));
+  const targets = extConfig?.externalDisplay?.targets;
+  const preset = Array.isArray(targets) && targets.length === 1 && targets[0];
+  const shippedDesktopPreset = preset && Object.keys(preset).length === 3
+    && preset.enabled === true && preset.url === "http://127.0.0.1:8001/emote"
+    && preset.transparentBackground === true;
+  if (customDestination && shippedDesktopPreset && merged.externalDisplay) {
+    merged = { ...merged, externalDisplay: { ...merged.externalDisplay } };
+    delete merged.externalDisplay.targets;
+  }
   if (userConfig) merged = deepMerge(merged, userConfig);
   if (projectConfig) merged = deepMerge(merged, projectConfig);
 

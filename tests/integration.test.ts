@@ -702,6 +702,8 @@ test("/emote d200Off stops the D200 stream without touching config", async () =>
     lab = await boot(root);
     const emote = lab.commands.get("emote");
     assert.ok(emote, "/emote is registered");
+    await emote.handler("localOff", lab.ctx); await flush();
+    calls.length = 0;
 
     const completions = await emote.getArgumentCompletions("d200");
     assert.deepEqual(completions.map((item: any) => item.value), ["d200On", "d200Off"]);
@@ -739,7 +741,7 @@ test("/emote d200Off stops the D200 stream without touching config", async () =>
 });
 
 
-test("all outputs default off; independent global switches survive project changes and restart", async () => {
+test("local defaults on; independent global switches survive project changes and restart", async () => {
   const root = mkdtempSync(join(tmpdir(), "emote-global-"));
   const profile = join(root, "profile");
   const config = { externalDisplay: { enabled: true, targets: [
@@ -761,7 +763,9 @@ test("all outputs default off; independent global switches survive project chang
     lab = await boot(join(root, "a"), [], profile);
     await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
     lab.widgets.render(100);
-    assert.equal(calls.length, 0, "configured destinations are silent before explicit On");
+    assert.ok(calls.length > 0 && calls.every(url => url === "http://localhost:8000/emote"), "only configured loopback destinations start on");
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
+    calls.length = 0;
     assert.ok(!lab.editor.render(100).join("").includes(PLACEHOLDER));
     assert.ok(!lab.writes.some(write => write.includes("\x1b_G") || write.includes("1337;File=")), "no initial graphics");
     const emote = lab.commands.get("emote");
@@ -1371,6 +1375,7 @@ test("/emote d200On <port> targets that port for this session and never persists
   try {
     lab = await boot(project, [], profile);
     const emote = () => lab!.commands.get("emote");
+    await emote().handler("localOff", lab.ctx); await flush();
     await emote().handler("read", lab.ctx); await flush();
     calls.length = 0;
     await emote().handler("d200On 9100", lab.ctx); await flush();
@@ -1421,6 +1426,7 @@ test("/emote d200On <port> refuses an invalid port without changing the mirror o
   const inputs = ["d200On 0", "d200On 65536", "d200On abc", "d200On 80.5", "d200On 127.0.0.1:9000", "d200On 9100/emote", "d200On -1"];
   try {
     lab = await boot(project, [], profile);
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
     await lab.commands.get("emote").handler("read", lab.ctx); await flush();
     // Nothing is on yet: a refused port must not enable the mirror or save anything.
     for (const input of inputs) {
@@ -1458,6 +1464,7 @@ test("bare /emote opens the panel, toggles an output and keeps every argument", 
   try {
     lab = await boot(root, [], profile);
     const emote = lab.commands.get("emote");
+    await emote.handler("localOff", lab.ctx);
     const opened = emote.handler("", lab.ctx);
     await flush();
     assert.equal(lab.customCalls.length, 1, "bare /emote opens exactly one overlay");

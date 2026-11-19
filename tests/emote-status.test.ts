@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boot } from "./integration.test.ts";
@@ -28,6 +28,8 @@ async function withLab(fn: (lab: Lab) => Promise<void>): Promise<void> {
   let lab: Lab | undefined;
   try {
     lab = { ...(await boot(root, [])), calls, root };
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
+    calls.length = 0;
     await fn(lab);
   } finally {
     await lab?.shutdown();
@@ -107,6 +109,9 @@ test("status with all outputs off is a read-only diagnostic that captures the PN
     // Let the startup greeting settle so a later blink cannot race the snapshot.
     await sleep(3000);
     const configBefore = readFileSync(join(lab.root, ".pi", "extensions", "gentle-emote", "config.json"), "utf8");
+    const stateDir = join(process.env.PI_CODING_AGENT_DIR!, "extensions", "gentle-emote", "output-states");
+    const preferenceSnapshot = () => readdirSync(stateDir).sort().map(name => [name, readFileSync(join(stateDir, name), "utf8")]);
+    const preferencesBefore = preferenceSnapshot();
     await lab.commands.get("emote").handler("exploring", lab.ctx);
     await flush();
     assert.equal(lab.calls.length, 0, "no destination is enabled, nothing is delivered");
@@ -122,8 +127,7 @@ test("status with all outputs off is a read-only diagnostic that captures the PN
     assert.equal(lab.calls.length, 0);
     assert.equal(lab.writes.length, writesBefore);
     assert.equal(readFileSync(join(lab.root, ".pi", "extensions", "gentle-emote", "config.json"), "utf8"), configBefore, "config.json is never rewritten");
-    const agentDir = process.env.PI_CODING_AGENT_DIR!;
-    assert.ok(!existsSync(join(agentDir, "extensions", "gentle-emote", "output-states")), "the global output preference store is never written");
+    assert.deepEqual(preferenceSnapshot(), preferencesBefore, "status never rewrites or adds output preferences");
     assert.deepEqual(lastNotice(lab).level, "info");
   });
 });
@@ -195,7 +199,10 @@ test("status separates a session without destinations from off modes", async () 
   globalThis.fetch = async () => new Response();
   let lab: Lab | undefined;
   try {
-    // No externalDisplay block at all: the shipped default is disabled.
+    // Explicitly disable the shipped desktop preset for the no-destination case.
+    const dir = join(root, ".pi", "extensions", "gentle-emote");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: false } }));
     lab = { ...(await boot(root, [])), calls: [], root };
     await lab.commands.get("emote").handler("status", lab.ctx);
     assert.match(lastNotice(lab).message, /; idleClock no destination$/);
