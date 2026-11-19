@@ -172,8 +172,11 @@ export class ExternalDisplay {
   // Capture identity for this sender lifetime: queued frames cannot change sessions.
   private readonly sessionId: string | null;
   private readonly focusRequest?: DesktopFocusRequest;
-  // Receipt only, scoped to this destination and cleared when its channel stops.
+  // Confirmed success only, scoped to this destination/stream and cleared on pause.
   private focusAck: string | null = null;
+  // HTTP may already have drained when focus completes: abort alone is insufficient.
+  private focusGeneration = 0;
+  private focusRequestVersion = 0;
   // Capture the sending project's working-directory basename for every image
   // destination: immutable per sender, never a full path. The raw basename
   // labels the captioned PNG layout on all destinations, and the percent-encoded
@@ -273,6 +276,7 @@ export class ExternalDisplay {
     this.phaseStartedAt = null;
     this.phaseUntimed = false;
     if (paused) {
+      this.focusGeneration++;
       this.focusAck = null;
       this.pending = null;
       this.heartbeatPending = false;
@@ -344,20 +348,24 @@ export class ExternalDisplay {
     }
   }
 
-  /** Headers are the entire fixed signal; never inspect receiver content or commands. */
+  /** Header-only signal on an accepted current-stream response; never parse content. */
   private handleFocus(response: Response, controller: AbortController): void {
     if (!this.focusRequest || !this.sessionId || this.disposed || this.paused || controller.signal.aborted
-      || response.status < 200 || response.status >= 300 || !response.ok) return;
+      || response.status !== 204) return;
     try {
-      // Legacy tests/receivers can omit headers. Broken optional metadata must not
-      // interfere with delivery, status handling, or body cancellation.
+      // Identity is immutable in the requesting sender, not echoed by the receiver.
+      // Old generic action headers are deliberately ignored, even when present.
       if (typeof response.headers?.get !== "function") return;
-      if (response.headers.get("X-Emote-Action") !== "focus"
-        || response.headers.get("X-Emote-Session-Id") !== this.sessionId) return;
-      const id = response.headers.get("X-Emote-Action-Id");
+      const id = response.headers.get("X-Emote-Focus-Request-Id");
       if (typeof id !== "string" || !HERDR_FOCUS_ID_PATTERN.test(id)) return;
-      const result = this.focusRequest(id);
-      if (!this.disposed && !this.paused && !controller.signal.aborted && (result === "accepted" || result === "duplicate")) this.focusAck = id;
+      const generation = this.focusGeneration;
+      const version = ++this.focusRequestVersion;
+      // Never hold the HTTP queue for a subprocess. The next ordinary request
+      // picks up success, provided neither lifecycle nor latest request changed.
+      void this.focusRequest(id).then(success => {
+        if (success === true && !this.disposed && !this.paused && !controller.signal.aborted
+          && generation === this.focusGeneration && version === this.focusRequestVersion) this.focusAck = id;
+      }).catch(() => { /* optional focus failure cannot affect image delivery */ });
     } catch { /* optional signal failures never break ordinary delivery */ }
   }
 
@@ -556,7 +564,7 @@ export class ExternalDisplay {
       let body: Buffer | undefined;
       const headers: Record<string, string> = { "X-Emote-Version": "1", "X-Emote-Stream-Id": this.streamId };
       if (this.sessionId) headers["X-Emote-Session-Id"] = this.sessionId;
-      if (this.focusRequest && this.focusAck) headers["X-Emote-Action-Ack"] = this.focusAck;
+      if (this.focusRequest && this.focusAck) headers["X-Emote-Focus-Ack"] = this.focusAck;
       if (image) {
         // Keep the same preparation and cache policy for legacy and session images.
         // The captioned layout is part of the cached bytes' identity per destination.
@@ -609,6 +617,7 @@ export class ExternalDisplay {
 
   dispose(): void {
     this.disposed = true;
+    this.focusGeneration++;
     this.focusAck = null;
     this.controls = [];
     if (this.clockTimer) clearInterval(this.clockTimer);
