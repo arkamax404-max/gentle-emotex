@@ -397,8 +397,8 @@ to the terminal: selected avatar frames with labels and no outline are POSTed to
 - Port **8003** keeps the key clear of the browser simulator (`8000`) and of the ESP32 firmware
   (`80`). `GENTLE_EMOTE_D200_PORT` overrides it for local experiments.
 - Enabling it mid-session starts with the current activity labels and re-sends the current frame.
+- **Herdr panel focus (opt-in sender side)**: both creation paths (`/emote d200On`, including the session-start restore of the saved On preference) wire the same captured Herdr focus controller as the configured local group, so a valid click signal from a compatible receiver ACKs successful focus on the next ordinary frame or heartbeat. The mirror keeps every guard: exact `/emote` loopback route, valid session identity, `DEDICATED-SUCCESS-v1` contract, shared dedup with per-destination ACK. Without valid Herdr context no callback is captured and the mirror is focus-less at any port. **Receiver compatibility is required, not shipped**: the key receiver must answer accepted frames with the exact 204 + `X-Emote-Focus-Request-Id` signal; this sender change alone does not certify it.
 - The mirror explicitly uses `idleClock: "receiver"`: one cached avatar carrier with clock metadata and existing heartbeats. **Clock rendering in the D200 receiver is pending implementation**; this prepares the same handoff as the desktop without generating clock artwork here.
-- The key press has no behaviour yet: the device only displays.
 
 ### Receiver protocol v1
 
@@ -480,11 +480,12 @@ gates are unchanged. This feature does not activate Windows Terminal or select a
 terminal tab.
 
 Use a Herdr-managed Pi session with its captured `HERDR_ENV=1`, `HERDR_BIN_PATH`,
-`HERDR_SOCKET_PATH` and `HERDR_PANE_ID` context, and an enabled configured loopback
-`/emote` destination (no query). `/emote localOn` enables the existing delivery
-channel; the signal itself never enables any output. Missing/invalid Herdr context
-means no focus capability and no acknowledgement. Trust the configured local
-receiver: session IDs route requests, but are not authentication.
+`HERDR_SOCKET_PATH` and `HERDR_PANE_ID` context, and either an enabled configured
+loopback `/emote` destination (no query) or the dedicated D200 mirror (`/emote d200On`,
+session restore included). `/emote localOn` enables the local delivery channel; the
+signal itself never enables any output. Missing/invalid Herdr context means no focus
+capability and no acknowledgement. Trust the configured local receiver: session IDs
+route requests, but are not authentication.
 
 | Direction | Headers / meaning |
 |-----------|-------------------|
@@ -518,11 +519,14 @@ duplicate values, missing/malformed/oversized IDs, **every non-204 response**
 `X-Emote-Action` / `X-Emote-Action-Id` / `X-Emote-Session-Id` response headers alone
 are ignored, and the sender never emits `X-Emote-Action-Ack`.
 Invalid or unknown ACKs are ignored by the receiver without rejecting a valid POST.
-The dedicated
-D200 mirror has **no focus capability at any port**; LAN/LED and serial outputs are
-also excluded. A configured local desktop is identified by its explicit sender
-capability, not by guessing a port. Any trusted receiver in the enabled local group
-can emit this fixed signal.
+Both the configured local group and the dedicated D200 mirror participate when the
+same captured controller was wired in; the default callback-less D200 factory (no
+Herdr context) proves focus-less on every port. LAN/LED and serial outputs are
+excluded. A participating destination is identified by its explicit sender
+capability, not by guessing a port. Any trusted participating receiver can emit
+this fixed signal, and the D200 key receiver must implement the identical
+DEDICATED-SUCCESS-v1 response contract (exact 204 plus `X-Emote-Focus-Request-Id`)
+to be compatible; receiver support itself is not yet shipped and is not certified here.
 
 Clicks arrive with the next frame, or the ordinary **5 s heartbeat** while idle
 (after the first frame); queueing/network delays can add latency. Receiver-clock

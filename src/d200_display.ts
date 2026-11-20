@@ -1,4 +1,4 @@
-import { ExternalDisplay } from "./external_display.ts";
+import { ExternalDisplay, type DesktopFocusRequest } from "./external_display.ts";
 
 /**
  * A Ulanzi D200 key client listens on this port. 8003 keeps it clear of the sibling
@@ -44,6 +44,8 @@ export function createD200Display(options: {
   sessionId?: string | null;
   /** Sending project's working-directory basename: labels the captioned PNG layout. */
   projectName?: string | null;
+  /** Opt-in: the captured Herdr focus controller, so the key receiver can request panel focus (DEDICATED-SUCCESS-v1). Undefined keeps the mirror focus-less. */
+  focusRequest?: DesktopFocusRequest;
 } = {}): ExternalDisplay {
   const url = d200Url(options.port ?? resolveD200Port());
   return new ExternalDisplay(
@@ -52,5 +54,6 @@ export function createD200Display(options: {
     options.report ?? (() => {}),
     options.sessionId ?? null,
     options.projectName ?? null,
+    options.focusRequest,
   );
 }
