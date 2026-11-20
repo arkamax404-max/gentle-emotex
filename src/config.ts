@@ -112,7 +112,10 @@ export function loadLayeredConfig(extDir: string, cwd: string): ConfigResult {
     layer?.externalDisplay && Object.hasOwn(layer.externalDisplay, "url"));
   const targets = extConfig?.externalDisplay?.targets;
   const preset = Array.isArray(targets) && targets.length === 1 && targets[0];
-  const shippedDesktopPreset = preset && Object.keys(preset).length === 3
+  // Recognize both shipped versions, never a target with other custom options.
+  const shippedDesktopPreset = preset
+    && (Object.keys(preset).length === 3 && !Object.hasOwn(preset, "idleClock")
+      || Object.keys(preset).length === 4 && preset.idleClock === "receiver")
     && preset.enabled === true && preset.url === "http://127.0.0.1:8001/emote"
     && preset.transparentBackground === true;
   if (customDestination && shippedDesktopPreset && merged.externalDisplay) {

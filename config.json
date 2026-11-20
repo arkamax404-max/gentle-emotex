@@ -5,7 +5,7 @@
     "url": "",
     "timeoutMs": 1000,
     "targets": [
-      { "enabled": true, "url": "http://127.0.0.1:8001/emote", "transparentBackground": true }
+      { "enabled": true, "url": "http://127.0.0.1:8001/emote", "transparentBackground": true, "idleClock": "receiver" }
     ]
   },
   "debug": false,

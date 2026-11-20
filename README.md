@@ -231,9 +231,23 @@ Only the main session sends images to external displays. Gentle Shell subagent s
 
 ### Desktop: ready on first install
 
-The shipped configuration enables one destination: `http://127.0.0.1:8001/emote`, with `transparentBackground: true` **on that target only**. Start [gentle-emote-desktop](https://github.com/arkamax404-max/gentle-emote-desktop) to receive the avatar without editing JSON. Canvas gaps are transparent; opaque black artwork is preserved (no chromakey). `/emote localOff` pauses local delivery and persists that choice; `/emote localOn` restores it. No receiver is installed or started automatically.
+The shipped configuration enables one destination: `http://127.0.0.1:8001/emote`, with `transparentBackground: true` and `idleClock: "receiver"` **on that target only**. After more than five uninterrupted settled idle minutes, the desktop draws its own clock; real activity restores the avatar. Start [gentle-emote-desktop](https://github.com/arkamax404-max/gentle-emote-desktop) to receive the avatar without editing JSON. Canvas gaps are transparent; opaque black artwork is preserved (no chromakey). `/emote localOff` pauses local delivery and persists that choice; `/emote localOn` restores it. No receiver is installed or started automatically.
 
-Your own `externalDisplay.targets` replaces this preset. A user/project legacy `externalDisplay.url` also replaces the shipped targets, so existing receivers are not redirected to the desktop. Explicit `externalDisplay.enabled: false` still disables delivery. The preset does not enable LAN, USB or D200, nor change their default image opacity.
+Your own `externalDisplay.targets` replaces this preset. A user/project legacy `externalDisplay.url` also replaces the shipped targets, so existing receivers are not redirected to the desktop. Explicit `externalDisplay.enabled: false` still disables delivery. The preset does not enable LAN, USB or D200, nor change their clock modes or default image opacity.
+
+To keep the desktop avatar instead of handing off to its clock, replace the target in your global or project config (arrays replace the preset as a whole):
+
+```json
+{
+  "externalDisplay": {
+    "targets": [
+      { "enabled": true, "url": "http://127.0.0.1:8001/emote", "transparentBackground": true, "idleClock": "off" }
+    ]
+  }
+}
+```
+
+An explicit target mode of `"silence"` is also preserved. A parent `idleClock` alone does not override a target's explicit mode.
 
 ### Other receivers
 
@@ -331,7 +345,7 @@ The USB PNG uses the **same LED layout as `displayOn`**: the group outline (whit
 
 | Mode | After more than five uninterrupted idle minutes |
 |------|-----------------------------------------------|
-| `"off"` (default, including omitted — HTTP destinations) | Ordinary avatar delivery and session heartbeats continue; no clock handoff |
+| `"off"` (HTTP default when omitted; the shipped desktop target explicitly uses `"receiver"`) | Ordinary avatar delivery and session heartbeats continue; no clock handoff |
 | `"receiver"` | Send one existing prepared avatar PNG tagged state `clock`, frame `clock.png`, set `idle-clock`; the desktop utility draws its own clock. Existing session heartbeats continue without periodic PNGs |
 | `"silence"` | Stop both PNGs and heartbeats, clearing pending traffic; the LED receiver enters its autonomous fallback after another **10 seconds** without traffic |
 

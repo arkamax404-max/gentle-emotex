@@ -17,8 +17,9 @@ test("shipped desktop preset preserves explicit legacy destinations and hardware
   try {
     const fresh = loadLayeredConfig(ext, project).config.externalDisplay;
     assert.equal(fresh.enabled, true);
-    assert.deepEqual(fresh.targets, [{ enabled: true, url: "http://127.0.0.1:8001/emote", transparentBackground: true }]);
+    assert.deepEqual(fresh.targets, [{ enabled: true, url: "http://127.0.0.1:8001/emote", transparentBackground: true, idleClock: "receiver" }]);
     assert.equal(fresh.transparentBackground, undefined, "USB/LAN do not inherit desktop transparency");
+    assert.equal(fresh.idleClock, undefined, "USB/LAN do not inherit the desktop clock mode");
     writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://matrix/emote" } }));
     const legacy = loadLayeredConfig(ext, project).config.externalDisplay;
     assert.equal(legacy.targets, undefined, "shipped targets must not shadow a saved legacy URL");
@@ -26,6 +27,55 @@ test("shipped desktop preset preserves explicit legacy destinations and hardware
     const targets = [{ enabled: true, url: "http://localhost:8001/emote", transparentBackground: false }];
     writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { targets } }));
     assert.deepEqual(loadLayeredConfig(ext, project).config.externalDisplay.targets, targets);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("old and receiver desktop presets yield to legacy URLs, but customized presets do not", () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-preset-compat-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ext = join(root, "ext");
+  const user = join(root, "agent", "extensions", "gentle-emote");
+  const project = join(root, "project");
+  const local = join(project, ".pi", "extensions", "gentle-emote");
+  for (const dir of [ext, user, local]) mkdirSync(dir, { recursive: true });
+  const desktop = { enabled: true, url: "http://127.0.0.1:8001/emote", transparentBackground: true };
+  try {
+    for (const layer of [user, local]) {
+      for (const target of [desktop, { ...desktop, idleClock: "receiver" }]) {
+        writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, targets: [target] } }));
+        writeFileSync(join(user, "config.json"), "{}");
+        writeFileSync(join(local, "config.json"), "{}");
+        writeFileSync(join(layer, "config.json"), JSON.stringify({ externalDisplay: { url: "http://matrix/emote" } }));
+        assert.deepEqual(loadLayeredConfig(ext, project).config.externalDisplay, {
+          enabled: true, url: "http://matrix/emote", timeoutMs: 1000,
+        }, `${layer}: ${JSON.stringify(target)}`);
+      }
+    }
+    for (const target of [
+      { ...desktop, idleClock: "off" },
+      { ...desktop, idleClock: "silence" },
+      { ...desktop, timeoutMs: 750 },
+      { ...desktop, idleClock: "receiver", timeoutMs: 750 },
+    ]) {
+      writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, targets: [target] } }));
+      assert.deepEqual(loadLayeredConfig(ext, project).config.externalDisplay.targets, [target], "customized targets keep precedence");
+    }
+    writeFileSync(join(ext, "config.json"), readFileSync(new URL("../config.json", import.meta.url)));
+    for (const layer of [user, local]) {
+      for (const idleClock of ["off", "silence"]) {
+        writeFileSync(join(user, "config.json"), "{}");
+        writeFileSync(join(local, "config.json"), "{}");
+        const targets = [{ ...desktop, idleClock }];
+        writeFileSync(join(layer, "config.json"), JSON.stringify({ externalDisplay: { targets } }));
+        assert.deepEqual(loadLayeredConfig(ext, project).config.externalDisplay.targets, targets);
+      }
+    }
+    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { enabled: false } }));
+    assert.equal(loadLayeredConfig(ext, project).config.externalDisplay.enabled, false);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     rmSync(root, { recursive: true, force: true });
