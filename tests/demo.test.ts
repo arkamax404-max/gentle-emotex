@@ -17,7 +17,7 @@ test("/emote demo visits all eight ODD phases without publishing activity or los
       await emote.handler("status", lab.ctx);
       const notice = lab.notices.at(-1)!;
       assert.equal(notice.level, "info");
-      assert.match(notice.message, /; phase none \(source: none\); activity status=idle phase=idle activeSubagents=0; idleClock (off|no destination)$/);
+      assert.match(notice.message, /; phase none \(source: none\); activity status=idle phase=idle activeSubagents=0; idleClock #1 mode=receiver session=yes (not-settled|remaining=\d+s) carrier=no$/);
       const state = notice.message.match(/status: PNG state=([^ ]+)/)?.[1];
       if (state) seen.push(state);
     }
@@ -30,7 +30,7 @@ test("/emote demo visits all eight ODD phases without publishing activity or los
     assert.deepEqual(seen.filter(state => original.includes(state)), original);
     await emote.handler("idle", lab.ctx);
     await emote.handler("status", lab.ctx);
-    assert.match(lab.notices.at(-1)!.message, /PNG state=idle .*; phase none \(source: none\); activity status=idle phase=idle activeSubagents=0; idleClock (off|no destination)$/);
+    assert.match(lab.notices.at(-1)!.message, /PNG state=idle .*; phase none \(source: none\); activity status=idle phase=idle activeSubagents=0; idleClock #1 mode=receiver session=yes remaining=\d+s carrier=no$/);
   } finally {
     await lab?.shutdown(); lab?.restore();
     t.mock.timers.reset();
