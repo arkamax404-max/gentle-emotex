@@ -176,7 +176,6 @@ test("both idle with running subagents shows SUBAGENTS and RUNNING with the coun
   const render = (activeSubagents: number) => decodePng(prepareDisplayImage(base64, { status: "idle", phase: "idle", activeSubagents }));
   const subagents = (count: string) => referenceRow(44, `SUBAGENTS (${count})`, index => index > "SUBAGENTS".length ? [255, 255, 0] : [128, 224, 160]);
   const image = render(2);
-
   // Corrected spelling and colors, proven pixel-by-pixel against the shared renderer.
   assert.deepEqual(statusRow(image), subagents("2"), "status row spells SUBAGENTS with the idle status color");
   assert.notDeepEqual(statusRow(image), referenceRow(44, "SUBAGETNS (2)", index => index > "SUBAGETNS".length ? [255, 255, 0] : [128, 224, 160]), "status row no longer spells the old SUBAGETNS typo");
@@ -190,7 +189,7 @@ test("both idle with running subagents shows SUBAGENTS and RUNNING with the coun
 
   // A selected frame and contradictory host detail never override RUNNING.
   for (const state of EMOTE_STATES) {
-    for (const activeSubagents of [1, 2, 1000]) {
+    for (const activeSubagents of [2, 1000]) {
       const selected = decodePng(prepareDisplayImage(base64, {
         status: "idle", phase: "idle", activeSubagents, state, workPhase: "planning",
       }));
@@ -226,14 +225,14 @@ test("the SUBAGENTS override applies only when both status and phase are idle wi
   assert.deepEqual(phaseRow(phaseOnly), referenceRow(54, "idle", [238, 238, 238]));
 });
 
-test("error at idle with running subagents shows red SUBAGENTS with a yellow count and a timed RUNNING phase clock", () => {
+test("error at idle with one running subagent shows red SUBAGENT beside a timed RUNNING phase clock", () => {
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
   const plain = decodePng(prepareDisplayImage(base64));
   // Exact user-reported state: the parent errored, went idle, and a worker is still running.
   const image = decodePng(prepareDisplayImage(base64, {
     status: "error", phase: "idle", activeSubagents: 1, state: "delegate", phaseElapsedSeconds: 38,
   }));
-  assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENTS (1)", index => index > "SUBAGENTS".length ? [255, 255, 0] : [255, 96, 96]), "the status row spells SUBAGENTS in the error red ink with the count yellow");
+  assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENT", [255, 96, 96]), "the status row spells SUBAGENT in the error red ink with no count");
   const clockStart = "RUNNING 00:38".lastIndexOf(" ") + 1;
   assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING 00:38", index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]), "the phase clock follows the RUNNING label instead of the selected emote");
   assert.deepEqual(image.data.slice(0, 44 * 64 * 4), plain.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");

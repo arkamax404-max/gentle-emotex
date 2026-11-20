@@ -106,11 +106,13 @@ export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActiv
   if (activity) {
     const color = activity.status === "error" ? [255, 96, 96] : activity.status === "busy" ? [255, 208, 96] : [128, 224, 160];
     const count = activity.activeSubagents ?? 0;
-    // Parent idle, including after error, while subagents run: show SUBAGENTS / RUNNING
-    // on the display only, without changing the underlying activity.
+    // Parent idle, including after error, while subagents run: show SUBAGENTS/SUBAGENT
+    // and RUNNING on the display only, without changing the underlying activity.
+    // Exactly one known child reads as the singular SUBAGENT with no count.
     const running = isRunningSubagents(activity);
-    const statusLabel = running ? "SUBAGENTS" : activity.status === "error" && activity.phase === "idle" ? "IDLE" : activity.status;
-    const label = count > 0 ? `${statusLabel} (${count > 999 ? "999+" : count})` : statusLabel;
+    const statusLabel = running ? ((activity.activeSubagents ?? 0) === 1 ? "SUBAGENT" : "SUBAGENTS")
+      : activity.status === "error" && activity.phase === "idle" ? "IDLE" : activity.status;
+    const label = count > 0 && !(running && count === 1) ? `${statusLabel} (${count > 999 ? "999+" : count})` : statusLabel;
     drawDisplayText(data, label, statusTop, index => index > statusLabel.length ? [255, 255, 0] : color);
     const phaseLabel = timedPhaseLabel(resolvePhaseLabel(activity), activity.phaseElapsedSeconds, activity.activeSubagents);
     const clockStart = phaseLabel.includes(":") ? phaseLabel.lastIndexOf(" ") + 1 : phaseLabel.length;
