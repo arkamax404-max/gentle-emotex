@@ -25,7 +25,7 @@ import { readYoloRest } from "./yolo.ts";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
 import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
-import { createSerialDisplay, serialSystemDeps, type SerialDisplay } from "./serial_display.ts";
+import { createSerialDisplay, serialSystemDeps, type SerialDisplay, type SerialPortInfo } from "./serial_display.ts";
 import { parseSerialPortPath } from "./serial_protocol.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { prepareDisplayImage } from "./display_image.ts";
@@ -333,8 +333,71 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  /** Strips ANSI escapes and control sequences (C0, C1, DEL) so OS-provided metadata cannot reach the TUI raw. */
+  function sanitizeUsbText(text: unknown): string {
+    return typeof text === "string"
+      ? text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim()
+      : "";
+  }
+
+  /**
+   * Picker label: the OS path plus only the metadata the OS actually reported,
+   * stated as facts (never a compatibility claim), each piece sanitized.
+   */
+  function formatUsbPortLabel(info: SerialPortInfo): string {
+    const facts: string[] = [];
+    const push = (value: string | undefined) => {
+      const clean = sanitizeUsbText(value);
+      if (clean && !facts.includes(clean)) facts.push(clean);
+    };
+    push(info.friendlyName);
+    push(info.manufacturer);
+    push(info.serialNumber);
+    const hex = (value: string | number | undefined) =>
+      typeof value === "number" ? value.toString(16).padStart(4, "0") : sanitizeUsbText(value);
+    const vid = hex(info.vendorId);
+    const pid = hex(info.productId);
+    if (vid && pid) facts.push(`usb ${vid}:${pid}`);
+    else if (vid) facts.push(`usb vid ${vid}`);
+    else if (pid) facts.push(`usb pid ${pid}`);
+    const path = sanitizeUsbText(info.path);
+    return facts.length > 0 ? `${path} — ${facts.join(" · ")}` : path;
+  }
+
+  /** The selector is a TUI facility, exactly like the control panel. */
+  function canShowUsbSelector(ctx: any): boolean {
+    return typeof ctx?.ui?.select === "function" && (ctx?.mode === undefined || ctx.mode === "tui");
+  }
+
+  /**
+   * Asks the user which port to open. The answer is mapped back to the original
+   * enumerated path through a Map — never re-parsed or split out of its label —
+   * and a cancel, a rejection or an unrecognizable answer leave everything as it was.
+   */
+  async function selectUsbPort(ctx: any, candidates: SerialPortInfo[]): Promise<string | null> {
+    const pathSeen = new Set<string>();
+    const byLabel = new Map<string, string>();
+    const options: string[] = [];
+    for (const info of candidates) {
+      if (pathSeen.has(info.path)) continue;
+      pathSeen.add(info.path);
+      let label = formatUsbPortLabel(info);
+      if (byLabel.has(label)) label = `${label} (${options.length + 1})`;
+      byLabel.set(label, info.path);
+      options.push(label);
+    }
+    try {
+      const chosen = await ctx.ui.select("USB serial display", options);
+      if (chosen === undefined) return null;
+      const mapped = byLabel.get(chosen);
+      return mapped === undefined ? null : mapped;
+    } catch {
+      return null;
+    }
+  }
+
   /** USB CDC output: at most one display, session-local port, nothing persisted on failure. */
-  async function setUsbDisplay(enabled: boolean, ctx: any, requestedPort?: string): Promise<boolean> {
+  async function setUsbDisplay(enabled: boolean, ctx: any, requestedPort?: string, allowSelection = false): Promise<boolean> {
     if (!ownsSharedDisplays) return false;
     if (!enabled) {
       const current = usbDisplay;
@@ -345,10 +408,33 @@ export default function (pi: ExtensionAPI) {
       ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display off`, "info");
       return true;
     }
-    if (requestedPort !== undefined) usbPort = requestedPort;
     if (usbDisplay) {
       ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display already on: ${usbDisplay.path ?? "auto"}`, "info");
       return true;
+    }
+    // The remembered port is only written by a successful start: a refused
+    // explicit port or a failed chosen open keeps the session's previous truth.
+    let target = requestedPort ?? usbPort ?? undefined;
+    if (target === undefined) {
+      let candidates: SerialPortInfo[] = [];
+      try { candidates = await serialSystemDeps().list(); } catch { candidates = []; }
+      if (candidates.length === 0) {
+        // Zero devices keeps the transport's no-device warning, without opening
+        // anything or enumerating the ports a second time.
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] no usb serial display found; usb serial display unchanged`, "warning");
+        return false;
+      }
+      if (candidates.length === 1) {
+        target = candidates[0]!.path;
+      } else if (allowSelection && canShowUsbSelector(ctx)) {
+        target = await selectUsbPort(ctx, candidates) ?? undefined;
+        if (target === undefined) {
+          ctx.ui?.notify?.(`[${EXTENSION_NAME}] usb serial display unchanged`, "warning");
+          return false;
+        }
+      }
+      // Several ports without an available selector keep the transport's refusal:
+      // `start(undefined)` warns exactly as before and never opens anything.
     }
     const link = createSerialDisplay({
       ...serialSystemDeps(),
@@ -356,7 +442,7 @@ export default function (pi: ExtensionAPI) {
       projectName: typeof cwd === "string" ? basename(cwd) : null,
       report: message => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),
     });
-    const started = await link.start(usbPort ?? undefined);
+    const started = await link.start(target);
     if (!started.ok) {
       ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${started.error}; usb serial display unchanged`, "warning");
       return false;
@@ -1153,7 +1239,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
         }
-        const started = await setUsbDisplay(true, ctx, requested === "" ? undefined : requested);
+        const started = await setUsbDisplay(true, ctx, requested === "" ? undefined : requested, requested === "");
         if (started) {
           try { outputState.save("usb", true); }
           catch { ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global usb state; output unchanged`, "error"); }
@@ -1242,7 +1328,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, displayOff releases it)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, usbOn with several visible ports offers a picker in the interactive TUI, displayOff releases it)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]

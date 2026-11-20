@@ -27,6 +27,12 @@ export interface SerialPortLike {
 
 export interface SerialPortInfo {
   path: string;
+  /** Optional OS metadata, surfaced only in the interactive picker; absent fields are simply absent. */
+  manufacturer?: string;
+  friendlyName?: string;
+  serialNumber?: string;
+  vendorId?: string | number;
+  productId?: string | number;
 }
 
 export interface SerialDisplayDeps {
