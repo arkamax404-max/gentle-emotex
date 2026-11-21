@@ -221,7 +221,10 @@ test("Gentle Shell child sessions never POST or register output commands even wi
   const root = mkdtempSync(join(tmpdir(), "emote-child-session-"));
   const profile = join(root, "profile");
   const saved = new OutputStateStore(profile);
-  for (const output of OUTPUTS) saved.save(output, true);
+  for (const output of ["internal", "debug", "display", "usb"]) saved.save(output, true);
+  // A legacy D200 preference left by an older version: session-local now, ignored.
+  const legacyD200 = join(profile, "extensions", "gentle-emote", "output-states", "d200.json");
+  writeFileSync(legacyD200, "true\n");
   const dir = join(root, ".pi", "extensions", "gentle-emote");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "config.json"), JSON.stringify({
@@ -248,8 +251,9 @@ test("Gentle Shell child sessions never POST or register output commands even wi
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(calls, 0, "animation cannot bypass the child-session restriction");
     assert.deepEqual(saved.load(message => assert.fail(message)), {
-      internal: true, debug: true, d200: true, display: true, usb: true,
-    }, "the child guard does not discard global output preferences");
+      internal: true, debug: true, d200: false, display: true, usb: true,
+    }, "the child guard does not discard persistent output preferences; the session-local d200 is never loaded");
+    assert.equal(readFileSync(legacyD200, "utf8"), "true\n", "the legacy d200 bytes survive untouched");
     lab.widgets.render(100);
     assert.equal(lab.writes.length, 0, "child sessions do not render a local terminal avatar");
     assert.equal(lab.widgets.children.length, 0, "child sessions do not install a widget");
@@ -598,6 +602,101 @@ test("the framed avatar sits beside the prompt, which grows to the frame height"
   }
 });
 
+test("the D200 output is session-local: a saved On preference is ignored at start and no D200 command ever writes state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-d200-session-local-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  mkdirSync(project, { recursive: true });
+  const stateDir = join(profile, "extensions", "gentle-emote", "output-states");
+  mkdirSync(stateDir, { recursive: true });
+  // A legacy preference left behind by an older version.
+  const legacyState = join(stateDir, "d200.json");
+  writeFileSync(legacyState, "true\n");
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(project, [], profile);
+    const emote = lab.commands.get("emote");
+    await emote.handler("localOff", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r0" }); await flush();
+    assert.equal(calls.filter(url => url.includes(":8003/")).length, 0, "a saved d200.json true never creates a sender at session start");
+    assert.equal(readFileSync(legacyState, "utf8"), "true\n", "the legacy bytes stay untouched during the session");
+
+    // On and Off change only the live session; nothing is written anywhere.
+    await emote.handler("d200On", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r1" }); await flush();
+    assert.ok(calls.some(url => url.startsWith("http://127.0.0.1:8003/")), "an explicit d200On mirrors frames");
+    assert.equal(readFileSync(legacyState, "utf8"), "true\n", "d200On never rewrites the legacy preference");
+    await emote.handler("d200Off", lab.ctx); await flush();
+    assert.equal(readFileSync(legacyState, "utf8"), "true\n", "d200Off never rewrites the legacy preference");
+    calls.length = 0;
+    await lab.emit("tool_execution_start", { toolName: "write", toolCallId: "r2" }); await flush();
+    assert.equal(calls.length, 0, "d200Off stops delivery");
+
+    // A corrupt legacy file is ignored without warnings and without any rewrite.
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    writeFileSync(legacyState, "{broken");
+    calls.length = 0;
+    lab = await boot(project, [], profile);
+    assert.ok(!lab.notices.some(notice => notice.message.includes("d200")), "the obsolete d200 preference never warns");
+    assert.equal(readFileSync(legacyState, "utf8"), "{broken", "a corrupt legacy preference is never rewritten");
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r3" }); await flush();
+    assert.equal(calls.filter(url => url.includes(":8003/")).length, 0, "a corrupt legacy preference stays off");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the D200 mirror is isolated per session: another session never inherits it and session_start resets the port choice", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-d200-isolation-"));
+  const profile = join(root, "profile");
+  const project = join(root, "project");
+  mkdirSync(project, { recursive: true });
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "d200.json");
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    // Session A turns the mirror on at a chosen port.
+    lab = await boot(project, [], profile);
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "a0" }); await flush();
+    calls.length = 0;
+    await lab.commands.get("emote").handler("d200On 9100", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "a1" }); await flush();
+    assert.ok(calls.length > 0 && calls.every(url => url.startsWith("http://127.0.0.1:9100/")), "session A mirrors to its chosen port");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+
+    // Session B starts later in the same profile: it inherits nothing.
+    calls.length = 0;
+    lab = await boot(project, [], profile);
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "b0" }); await flush();
+    assert.deepEqual(calls.filter(url => url.includes(":9100/") || url.includes(":8003/")).length, 0, `a separate session never inherits the mirror: ${JSON.stringify(calls)}`);
+    assert.equal(existsSync(savedState), false, "no d200 state file is ever written by any session");
+    await lab.shutdown(); lab.restore(); lab = undefined;
+
+    // A fresh start also resets the port choice: bare d200On returns to the default.
+    calls.length = 0;
+    lab = await boot(project, [], profile);
+    await lab.commands.get("emote").handler("localOff", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "c0" }); await flush();
+    assert.equal(calls.filter(url => url.includes(":8003/") || url.includes(":9100/")).length, 0, "a fresh session starts the mirror off");
+    await lab.commands.get("emote").handler("d200On", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "c1" }); await flush();
+    assert.ok(calls.length > 0 && calls.every(url => url.startsWith("http://127.0.0.1:8003/")), "a bare d200On after a fresh start uses the process default port");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("/emote d200Off stops the D200 stream without touching config", async () => {
   const root = mkdtempSync(join(tmpdir(), "emote-d200-"));
   const dir = join(root, ".pi", "extensions", "gentle-emote");
@@ -704,7 +803,7 @@ test("local defaults on; independent global switches survive project changes and
     lab.widgets.render(100);
     assert.ok(lab.editor.render(100).join("").includes(PLACEHOLDER), "global internalOn survives restart in another project");
     assert.ok(calls.includes("http://localhost:8000/emote"));
-    assert.ok(calls.includes("http://127.0.0.1:8003/emote"));
+    assert.ok(!calls.includes("http://127.0.0.1:8003/emote"), "the D200 mirror is session-local: a restart starts off even after d200On");
     assert.ok(calls.includes("http://matrix/emote"), "global displayOn survives restart");
     assert.ok(!calls.includes("http://disabled/emote"), "On never enables disabled destinations");
     for (const output of ["internalOff", "localOff", "d200Off", "displayOff"]) await lab.commands.get("emote").handler(output, lab.ctx);
@@ -1297,7 +1396,7 @@ test("/emote d200On <port> targets that port for this session and never persists
     assert.ok(calls.length > 0, "the mirror delivers frames");
     assert.ok(calls.every(url => url.startsWith("http://127.0.0.1:9100/")), `every request goes to the session port: ${JSON.stringify(calls)}`);
     assert.equal(existsSync(globalConfig), false, "the port never enters config.json");
-    assert.equal(new OutputStateStore(profile).load(() => {}).d200, true, "the On preference stays global and persistent");
+    assert.equal(existsSync(join(profile, "extensions", "gentle-emote", "output-states", "d200.json")), false, "the whole output is session-local: no d200.json is ever written");
     assert.match(lab.notices.at(-1)?.message ?? "", /D200 mirroring on: http:\/\/127\.0\.0\.1:9100\/emote/);
 
     // A second explicit port replaces the live sender instead of being ignored.
@@ -1307,20 +1406,25 @@ test("/emote d200On <port> targets that port for this session and never persists
     assert.ok(calls.some(url => url.startsWith("http://127.0.0.1:9101/")), "the new port delivers");
     assert.ok(!calls.some(url => url.startsWith("http://127.0.0.1:9100/")), `the replaced sender stops: ${JSON.stringify(calls)}`);
 
-    // The port is session-local: a reload restores the saved On state at the
-    // default port, because no port was ever written anywhere.
-    calls.length = 0;
-    await lab.emit("session_start");
-    // The reloaded sender starts empty, so a normal state transition is what
-    // pushes the next frame: emulate the host with a different tool.
-    await lab.emit("tool_execution_start", { toolName: "edit", toolCallId: "r3" }); await flush();
-    assert.ok(calls.some(url => url.startsWith("http://127.0.0.1:8003/")), `a reload falls back to the default port: ${JSON.stringify(calls)}`);
-    assert.ok(!calls.some(url => url.startsWith("http://127.0.0.1:9101/")), "the session port does not survive a reload");
-
+    // d200Off then bare d200On keeps the session's remembered port choice.
     await emote().handler("d200Off", lab.ctx); await flush();
     calls.length = 0;
+    await emote().handler("d200On", lab.ctx); await flush();
+    await lab.emit("tool_execution_start", { toolName: "write", toolCallId: "r2b" }); await flush();
+    assert.ok(calls.length > 0 && calls.every(url => url.startsWith("http://127.0.0.1:9101/")), `d200Off→d200On retains the session port choice: ${JSON.stringify(calls)}`);
+
+    // The whole output is session-local: a reload starts off, and neither the
+    // saved state nor the port choice survives it.
+    await emote().handler("d200Off", lab.ctx); await flush();
+    calls.length = 0;
+    await lab.emit("session_start");
+    await lab.emit("tool_execution_start", { toolName: "edit", toolCallId: "r3" }); await flush();
+    assert.deepEqual(calls.filter(url => url.includes(":8003/") || url.includes(":9101/")).length, 0, `a reload starts the D200 mirror off: ${JSON.stringify(calls)}`);
+    assert.equal(existsSync(join(profile, "extensions", "gentle-emote", "output-states", "d200.json")), false, "a reload still writes no d200.json");
+
+    calls.length = 0;
     await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r4" }); await flush();
-    assert.equal(calls.length, 0, "d200Off still stops every D200 port");
+    assert.equal(calls.filter(url => url.includes(":8003/") || url.includes(":9101/")).length, 0, "d200Off still stops every D200 port");
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });
@@ -1364,7 +1468,7 @@ test("/emote d200On <port> refuses an invalid port without changing the mirror o
     calls.length = 0;
     await lab.emit("tool_execution_start", { toolName: "read", toolCallId: "r" }); await flush();
     assert.ok(calls.length > 0 && calls.every(url => url.startsWith("http://127.0.0.1:9100/")), `the session port still delivers: ${JSON.stringify(calls)}`);
-    assert.equal(new OutputStateStore(profile).load(() => {}).d200, true, "the saved preference is untouched");
+    assert.equal(existsSync(savedState), false, "the session-local D200 never writes a preference file");
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });

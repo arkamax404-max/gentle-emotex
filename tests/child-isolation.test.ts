@@ -100,9 +100,10 @@ for (const marker of [undefined, "0"]) {
       await tick();
       assert.ok(lab.commands.has("emote"));
       assert.ok(lab.widgets.length > 0);
-      for (const target of ["127.0.0.1:8000", "matrix.invalid", "127.0.0.1:8003"]) {
+      for (const target of ["127.0.0.1:8000", "matrix.invalid"]) {
         assert.ok(lab.requests.some(request => request.url.includes(target)), `primary preserves ${target}`);
       }
+      assert.ok(!lab.requests.some(request => request.url.includes(":8003")), "the legacy saved D200 preference is ignored: no primary sender at session start");
       const headers = lab.requests.map(request => new Headers(request.init.headers));
       assert.ok(headers.some(header => header.get("X-Emote-Active-Subagents") === "1" && header.get("X-Emote-State") === "explore"));
       assert.deepEqual(lab.preferenceBytes(), ["true\n", "true\n", "true\n", "true\n"]);
