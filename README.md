@@ -152,8 +152,8 @@ A source that is already configured keeps loading until it is updated or removed
 | `/emote localOff` | Pauses POSTs to configured localhost simulators; ESP32 delivery continues |
 | `/emote localOn` | Resumes localhost delivery immediately with the latest PNG and activity |
 | `/emote debugOn` / `debugOff` | Diagnostic-only: shows, or hides again, the routine `externalDisplay: unsupported frame identifier; skipped` reports on every display destination. **Session-local and off by default**: nothing is saved, a new session or `/reload` starts off, delivery and other warnings are unchanged, and this is a different switch from the local output (`localOn`) saved as `debug` |
-| `/emote d200On` | Mirrors frames to a Ulanzi D200 key on `127.0.0.1:8003`, independently of `config.json`; `/emote d200On <port>` uses that port for this session only |
-| `/emote d200Off` | Stops the D200 mirror without touching configured destinations |
+| `/emote d200On` | Mirrors frames to a Ulanzi D200 key on `127.0.0.1:8003`, independently of `config.json`; **session-local**: both the enabled state and the port live only in the current session and nothing is saved. `/emote d200On <port>` uses that port for this session |
+| `/emote d200Off` | Stops the D200 mirror without touching configured destinations or any preference file |
 | `/emote displayOn` | Resumes delivery to configured non-loopback LED/ESP32 destinations and claims the display for this session; firmware without session ownership keeps ordinary delivery with a one-time warning. `/emote displayOn <address>` points the group at that board and saves it in the user-global config |
 | `/emote displayOff` | Pauses LED/ESP32 delivery and releases this session's reservation, without affecting the terminal, simulators or D200 |
 | `/emote title <text>` | Sets the caption above the avatar on every external display for this project, saved in `.pi/extensions/gentle-emote/title.json`; bare `/emote title` restores the project folder basename |
@@ -229,7 +229,9 @@ Drop a `config.json` with only the keys you want to change in either place (the 
 
 ### Global output preferences
 
-The local output (`localOn`, saved as `debug`) is **on by default** when no preference exists. The `internal`, `d200`, `display` and `usb` outputs are **off by default**. A saved `localOff` remains off after an update; missing preferences are not written automatically. Each On/Off command saves its own global boolean under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Choices survive `/reload`, restarts and project changes until another command changes them. Project configuration cannot override these preferences. Already-running sessions restore them on their next session start/reload; commands change the current session immediately.
+The local output (`localOn`, saved as `debug`) is **on by default** when no preference exists. The `internal`, `display` and `usb` outputs are **off by default** and each On/Off command saves its own global boolean under `<agent dir>/extensions/gentle-emote/output-states/<output>.json`; choices survive `/reload`, restarts and project changes until another command changes them, and already-running sessions restore them on their next session start/reload. A saved `localOff` remains off after an update; missing preferences are not written automatically. The agent dir is `PI_CODING_AGENT_DIR`, or `~/.pi/agent`. Project configuration cannot override these preferences; commands change the current session immediately.
+
+The **D200 output is the exception: it is fully session-local** — both the enabled state and the port (`/emote d200On <port>`) belong to the current session, are written nowhere, and every new session or `/reload` starts it **off**. `d200Off` followed by bare `d200On` inside the same session reuses that session's port choice, which a session start resets to `GENTLE_EMOTE_D200_PORT`/`8003`. A legacy `output-states/d200.json` left by an older version is ignored: never read, never warned about and never rewritten, whatever it contains (true, false or corrupt bytes).
 
 `internalOn` / `internalOff` affect only the terminal avatar (graphics or ASCII), not the animation engine, activity tracking or other outputs. While hidden, no terminal image uploads occur. Keep the extension's `enabled: true` so the commands remain available.
 
@@ -402,22 +404,21 @@ The session-title caption reflects the host's context usage on every image desti
 to the terminal: selected avatar frames with labels and no outline are POSTed to
 `http://127.0.0.1:8003/emote`. `/emote d200Off` disposes it.
 
-- The toggle is **global and persistent**, initially off. It never writes `config.json` or changes
-  configured `externalDisplay` destinations. Only `/emote d200On` and `/emote d200Off` change its
-  saved preference.
+- The toggle is **session-local** (as is the port): initially off, it never writes `config.json`, never writes any preference file, and never changes configured `externalDisplay` destinations. Every new session or `/reload` starts it **off**, even when an older version saved a `output-states/d200.json` preference — that legacy file is ignored silently (never read, never warned about, never rewritten), so its bytes survive untouched.
 - `/emote d200On <port>` uses that TCP port for the current session instead of the default, for a key
-  client that listens somewhere else. The port is **never written anywhere**: the On preference stays
-  global, while the port returns to `GENTLE_EMOTE_D200_PORT`/`8003` at the next `/reload` or restart.
+  client that listens somewhere else. The port is **never written anywhere**: `d200Off` followed by bare
+  `d200On` reuses the session's port choice, while the port returns to `GENTLE_EMOTE_D200_PORT`/`8003`
+  at the next session start, `/reload` or restart.
   Naming another port while the mirror is already on replaces the sender instead of being ignored.
   Only a bare decimal port in `1`–`65535` is accepted; `0`, `65536`, `-1`, `+8003`, `80.5`, `1e3`,
   `0x1f90`, `abc`, `127.0.0.1:9000`, `9100/emote` and URLs are refused with
   `invalid D200 port (1-65535); D200 mirror unchanged`, and an empty argument with
-  `missing D200 port; D200 mirror unchanged`. A refused port sends nothing, leaves the live mirror
-  alone and leaves the saved preference untouched.
+  `missing D200 port; D200 mirror unchanged`. A refused port sends nothing and leaves the live mirror
+  alone; there is no saved preference to leave untouched.
 - Port **8003** keeps the key clear of the browser simulator (`8000`) and of the ESP32 firmware
   (`80`). `GENTLE_EMOTE_D200_PORT` overrides it for local experiments.
 - Enabling it mid-session starts with the current activity labels and re-sends the current frame.
-- **Herdr panel focus (opt-in sender side)**: both creation paths (`/emote d200On`, including the session-start restore of the saved On preference) wire the same captured Herdr focus controller as the configured local group, so a valid click signal from a compatible receiver ACKs successful focus on the next ordinary frame or heartbeat. The mirror keeps every guard: exact `/emote` loopback route, valid session identity, `DEDICATED-SUCCESS-v1` contract, shared dedup with per-destination ACK. Without valid Herdr context no callback is captured and the mirror is focus-less at any port. **Receiver compatibility is required, not shipped**: the key receiver must answer accepted frames with the exact 204 + `X-Emote-Focus-Request-Id` signal; this sender change alone does not certify it.
+- **Herdr panel focus (opt-in sender side)**: the explicit `/emote d200On` command wires the same captured Herdr focus controller as the configured local group, so a valid click signal from a compatible receiver ACKs successful focus on the next ordinary frame or heartbeat. There is no session-start restore anymore, so no sender — and no focus wiring — is ever created from a saved preference. The mirror keeps every guard: exact `/emote` loopback route, valid session identity, `DEDICATED-SUCCESS-v1` contract, shared dedup with per-destination ACK. Without valid Herdr context no callback is captured and the mirror is focus-less at any port. **Receiver compatibility is required, not shipped**: the key receiver must answer accepted frames with the exact 204 + `X-Emote-Focus-Request-Id` signal; this sender change alone does not certify it.
 - The mirror explicitly uses `idleClock: "receiver"`: one cached avatar carrier with clock metadata and existing heartbeats. **Clock rendering in the D200 receiver is pending implementation**; this prepares the same handoff as the desktop without generating clock artwork here.
 
 ### Receiver protocol v1

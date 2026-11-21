@@ -346,7 +346,7 @@ test("extension captures context once, retains dedup on board rebuild, and dispo
   }
 });
 
-test("both D200 creation paths wire the captured controller: session restore and explicit d200On ACK success on the next D200 frame", async t => {
+test("a saved On preference creates no D200 sender at start while an explicit d200On wires the captured controller and ACKs success on the next D200 frame", async t => {
   const root = mkdtempSync(join(tmpdir(), "emote-d200-focus-"));
   const keys = ["PI_CODING_AGENT_DIR", "HOME", "USERPROFILE", "GENTLE_PI_AGENTS_CHILD", ...Object.keys(env)];
   const saved = keys.map(key => process.env[key]);
@@ -366,7 +366,7 @@ test("both D200 creation paths wire the captured controller: session restore and
     const configDir = join(root, "agent", "extensions", "gentle-emote");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "config.json"), JSON.stringify({ enabled: true, externalDisplay: { enabled: false } }));
-    // Restore path: the saved On preference makes session_start create the D200 sender.
+    // A legacy d200.json left by an older version: session-local now, never restored.
     mkdirSync(join(configDir, "output-states"), { recursive: true });
     writeFileSync(join(configDir, "output-states", "d200.json"), "true\n");
     globalThis.fetch = (async (url, init) => {
@@ -384,17 +384,23 @@ test("both D200 creation paths wire the captured controller: session restore and
     const d200Calls = () => calls.filter(call => call.url.includes(":8003/"));
     const d200Acks = () => d200Calls().map(call => new Headers(call.init.headers).get("X-Emote-Focus-Ack"));
 
-    // Restore path.
+    // Legacy restore: the saved On preference is ignored — no sender, no focus.
     await handlers.get("session_start")!({}, ctx);
     await command.handler("idle", ctx); await flush();
-    assert.ok(d200Calls().length > 0, "the restored D200 sender mirrors frames");
-    assert.equal(executions.length, 1, "the restored sender requested focus exactly once");
+    assert.equal(d200Calls().length, 0, "a saved d200.json true never creates a sender at session start");
+    assert.equal(executions.length, 0, "no focus process without an explicit d200On");
+
+    // Explicit command path.
+    await command.handler("d200On", ctx); await flush();
+    await command.handler("idle", ctx); await flush();
+    assert.ok(d200Calls().length > 0, "the explicit d200On sender mirrors frames");
+    assert.equal(executions.length, 1, "the explicitly created sender requested focus exactly once");
     assert.deepEqual(executions[0]!.args, ["agent", "focus", "pane-A"]);
     executions[0]!.done(null, confirmed(), ""); await flush();
     await command.handler("think", ctx); await flush();
     assert.deepEqual(d200Acks(), [null, "click-1"], "ACK rides the next ordinary D200 frame after confirmation");
 
-    // Explicit command path.
+    // Rebuild path: off then on wires the controller again.
     await command.handler("d200Off", ctx);
     await command.handler("d200On", ctx); await flush();
     await command.handler("idle", ctx); await flush();
@@ -413,7 +419,7 @@ test("both D200 creation paths wire the captured controller: session restore and
   }
 });
 
-test("without valid Herdr context both D200 creation paths stay focus-inert", async t => {
+test("without valid Herdr context an explicit d200On stays focus-inert and a saved On preference creates no sender", async t => {
   const root = mkdtempSync(join(tmpdir(), "emote-d200-focus-invalid-"));
   const keys = ["PI_CODING_AGENT_DIR", "HOME", "USERPROFILE", "GENTLE_PI_AGENTS_CHILD", "HERDR_ENV", "HERDR_BIN_PATH", "HERDR_SOCKET_PATH", "HERDR_PANE_ID"];
   const saved = keys.map(key => process.env[key]);
@@ -450,8 +456,12 @@ test("without valid Herdr context both D200 creation paths stay focus-inert", as
     extension({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand: (_name: string, value: any) => { command = value; }, getThinkingLevel: () => "high" } as any);
     const d200Acks = () => calls.filter(call => call.url.includes(":8003/")).map(call => new Headers(call.init.headers).get("X-Emote-Focus-Ack"));
 
+    // Legacy restore: the saved On preference is ignored — no sender, no frames.
     await handlers.get("session_start")!({}, ctx);
     await command.handler("idle", ctx); await flush();
+    assert.equal(d200Acks().length, 0, "a saved d200.json true never creates a sender at session start");
+    assert.equal(executions, 0);
+    // Explicit command path without valid Herdr context: the same wiring stays inert.
     await command.handler("d200Off", ctx);
     await command.handler("d200On", ctx); await flush();
     await command.handler("idle", ctx); await flush();

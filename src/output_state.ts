@@ -7,6 +7,13 @@ export const OUTPUTS = ["internal", "debug", "d200", "display", "usb"] as const;
 export type Output = typeof OUTPUTS[number];
 export type OutputStates = Record<Output, boolean>;
 
+/**
+ * Outputs with a persisted boolean. The D200 key is deliberately absent: both its
+ * enabled state and its port are session-local, so `d200.json` is a legacy file
+ * that is never read, never warned about and never rewritten.
+ */
+const PERSISTENT_OUTPUTS: readonly Output[] = OUTPUTS.filter(output => output !== "d200");
+
 /** Global preferences are separate from layered config and from each other. */
 export class OutputStateStore {
   private dir: string;
@@ -31,7 +38,8 @@ export class OutputStateStore {
 
   load(report: (message: string) => void): OutputStates {
     const states = { internal: false, debug: false, d200: false, display: false, usb: false };
-    for (const output of OUTPUTS) {
+    // The d200 state is session-local: any legacy d200.json is ignored silently.
+    for (const output of PERSISTENT_OUTPUTS) {
       try { states[output] = this.read(output); }
       catch { report(`cannot read saved ${output} state; output stays off`); }
     }
@@ -39,6 +47,7 @@ export class OutputStateStore {
   }
 
   save(output: Output, enabled: boolean): void {
+    if (output === "d200") throw new Error("the d200 state is session-local and is never saved");
     // Do not silently overwrite corrupt or unreadable preferences.
     this.read(output);
     mkdirSync(this.dir, { recursive: true });

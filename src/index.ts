@@ -118,8 +118,8 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   debugOff: "hide the routine unsupported-frame reports again (session-local diagnostic; default)",
   localOn: "resume delivery to configured localhost simulators",
   localOff: "pause localhost delivery without affecting the ESP32",
-  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003 and relay Herdr panel-focus ACKs when Herdr context exists; d200On <port> uses that port for this session only",
-  d200Off: "stop mirroring to the Ulanzi D200 key",
+  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003 and relay Herdr panel-focus ACKs when Herdr context exists; session-local (state and port, never persisted); d200On <port> uses that port for this session only",
+  d200Off: "stop mirroring to the Ulanzi D200 key (session-local: nothing is saved, a new session starts off)",
   displayOn: "resume LED/ESP32 delivery and claim the display for this session; displayOn <address> points the group at that board",
   displayOff: "pause LED/ESP32 delivery and release this session's claim",
 };
@@ -1347,17 +1347,13 @@ export default function (pi: ExtensionAPI) {
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] LED/ESP32 display: ${parsed.url}${kept}`, "info");
         return;
       }
-      // `/emote d200On <port>` picks the key receiver port. Only the On preference
-      // is global; the port belongs to this session and is written nowhere.
+      // `/emote d200On <port>` picks the key receiver port. The whole D200 output is
+      // session-local: neither the enabled state nor the port is written anywhere, so
+      // every fresh session (and /reload) starts off.
       if (name.startsWith("d200On ")) {
         const parsed = parseD200Port(name.slice("d200On".length).trim());
         if (parsed.port === null) {
           ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${parsed.error}; D200 mirror unchanged`, "warning");
-          return;
-        }
-        try { outputState.save("d200", true); }
-        catch {
-          ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global d200 state; output unchanged`, "error");
           return;
         }
         setD200Display(true, ctx, parsed.port);
@@ -1386,8 +1382,10 @@ export default function (pi: ExtensionAPI) {
         await setUsbDisplay(false, ctx);
         return;
       }
+      // The d200 commands are handled below and never persist: the D200 output is
+      // fully session-local (state and port).
       const output = OUTPUTS.find(output => name === `${outputCommandName(output)}On` || name === `${outputCommandName(output)}Off`);
-      if (output) {
+      if (output && output !== "d200") {
         try { outputState.save(output, name === `${outputCommandName(output)}On`); }
         catch {
           ctx.ui?.notify?.(`[${EXTENSION_NAME}] cannot save global ${outputCommandName(output)} state; output unchanged`, "error");
@@ -1473,7 +1471,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | debugOn | debugOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, usbOn with several visible ports offers a picker in the interactive TUI, displayOff releases it, debugOn/debugOff are session-local diagnostics that only show or hide the routine unsupported-frame warning, default off, persisting nothing and never enabling an output)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | debugOn | debugOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On/d200Off and d200On <port> are session-local — mirror state and port never persist and a new session starts off —, usbOn with several visible ports offers a picker in the interactive TUI, displayOff releases it; debugOn/debugOff are session-local diagnostics that only show or hide the routine unsupported-frame warning, default off, persisting nothing and never enabling an output)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
@@ -1524,14 +1522,16 @@ export default function (pi: ExtensionAPI) {
     externalDisplay?.setDebugEnabled(states.debug);
     externalDisplay?.setDisplayEnabled(states.display);
     d200Display?.dispose();
-    // The port is session-local: a fresh session never inherits another one's choice.
+    d200Display = null;
+    // The D200 output is fully session-local: a fresh session (or /reload) starts
+    // off even when an older version saved a d200.json preference. That legacy
+    // file is ignored — never read, never warned about and never rewritten — and
+    // the session port choice resets here too.
     d200Port = null;
     d200LivePort = null;
     // The diagnostic warning toggle is also session-local: every session start
     // (and /reload) resets it, so freshly constructed senders stay silent.
     frameWarningsOn = false;
-    d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName, focusRequest: desktopFocusRequest() }) : null;
-    d200Display?.setFrameWarningEnabled(frameWarningsOn);
     usbDisplay = null;
     usbPort = null;
     stopUsbClock();

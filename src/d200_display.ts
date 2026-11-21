@@ -21,7 +21,8 @@ export function d200Url(port = resolveD200Port()): string {
 /**
  * `/emote d200On <port>` grammar: a bare decimal TCP port and nothing else, so the
  * argument can never smuggle a scheme, host or path into the destination. The default
- * stays `GENTLE_EMOTE_D200_PORT`/8003; an accepted port overrides it for that session.
+ * stays `GENTLE_EMOTE_D200_PORT`/8003; an accepted port overrides it for that session
+ * and the choice resets at every session start.
  */
 export function parseD200Port(input: string): { port: number | null; error: string | null } {
   const value = input.trim();
@@ -33,9 +34,12 @@ export function parseD200Port(input: string): { port: number | null; error: stri
 }
 
 /**
- * Independent destination for the D200 key, toggled at runtime by `/emote d200On` and
- * `/emote d200Off`. It is never part of the layered config, so enabling it cannot be
- * persisted by accident and disabling it never touches configured destinations.
+ * Dedicated destination for the D200 key, toggled only by `/emote d200On` and
+ * `/emote d200Off`. It is fully session-local — both the enabled state and the
+ * port belong to the current session and are written nowhere — so enabling it
+ * cannot be persisted by accident, a fresh session or /reload always starts off,
+ * and disabling it never touches configured destinations. A legacy
+ * `output-states/d200.json` left by an older version is ignored.
  */
 export function createD200Display(options: {
   port?: number;
