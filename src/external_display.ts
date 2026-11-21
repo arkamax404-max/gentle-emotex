@@ -212,7 +212,7 @@ export class ExternalDisplay {
   private phaseLabel: string | null = null;
   private phaseStartedAt: number | null = null;
   // Whether the current visible phase is exempt from the clock: visible IDLE or
-  // GRANDMA with no active subagents. Tracked separately so an eligibility
+  // NO TASK with no active subagents. Tracked separately so an eligibility
   // transition resets the budget even when the label itself stays unchanged.
   private phaseUntimed = false;
   // Independent of terminal caches; at most 32 prepared avatar images.
@@ -508,14 +508,14 @@ export class ExternalDisplay {
   /**
    * Timer identity follows the visible phase label per destination: reset on
    * every visible change, preserved across same-label frames and activity
-   * updates, elapsed only past five seconds. Visible IDLE and GRANDMA stay
+   * updates, elapsed only past five seconds. Visible IDLE and NO TASK stay
    * untimed only while no subagent is running: with active workers they time
    * like any other phase, the timer clears the moment the workers finish, and
    * a later start on the same visible label begins a fresh budget.
    */
   private phaseElapsed(image: SelectedImage, now: number): number | undefined {
     const label = resolvePhaseLabel({ ...this.activity, state: image.state });
-    const untimed = ["IDLE", "GRANDMA"].includes(label.toUpperCase()) && this.activity.activeSubagents === 0;
+    const untimed = ["IDLE", "NO TASK"].includes(label.toUpperCase()) && this.activity.activeSubagents === 0;
     if (label !== this.phaseLabel || untimed !== this.phaseUntimed) {
       this.phaseLabel = label;
       this.phaseUntimed = untimed;

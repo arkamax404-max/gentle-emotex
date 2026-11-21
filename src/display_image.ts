@@ -11,7 +11,7 @@ const actionLabels = new Map<string, string>([
   ["write", "writing"], ["compact", "compacting"], ["ask", "asking"],
   ["delegate", "delegating"], ["remember", "remembering"],
   ["explore", "exploring"], ["build", "building"], ["verify", "verifying"],
-  ["judge", "judging"], ["review", "reviewing"],
+  ["judge", "judging"], ["review", "reviewing"], ["grandma", "no task"],
 ]);
 
 /**
@@ -41,10 +41,10 @@ export function resolvePhaseLabel(activity: Pick<DisplayActivity, "status" | "ph
   return actionLabels.get(detailed) ?? detailed;
 }
 
-/** MM:SS beside the visible phase label; visible IDLE and GRANDMA render untimed only without active subagents, as do invalid/negative elapsed values. */
+/** MM:SS beside the visible phase label; visible IDLE and NO TASK render untimed only without active subagents, as do invalid/negative elapsed values. */
 function timedPhaseLabel(label: string, phaseElapsedSeconds: number | undefined, activeSubagents?: number): string {
   if (phaseElapsedSeconds === undefined || !Number.isFinite(phaseElapsedSeconds) || phaseElapsedSeconds < 0) return label;
-  if (["IDLE", "GRANDMA"].includes(label.toUpperCase()) && (activeSubagents ?? 0) === 0) return label;
+  if (["IDLE", "NO TASK"].includes(label.toUpperCase()) && (activeSubagents ?? 0) === 0) return label;
   const total = Math.floor(phaseElapsedSeconds);
   const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
   // The full row must fit the 16-character font limit: the clock grows past

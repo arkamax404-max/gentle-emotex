@@ -119,18 +119,18 @@ test("an errored idle parent with running subagents times the RUNNING phase cloc
 });
 
 
-test("GRANDMA stays untimed and returning to work starts a fresh phase clock", async t => {
+test("NO TASK stays untimed and returning to work starts a fresh phase clock", async t => {
   const advance = virtualTime(t), calls: RequestInit[] = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
   const last = () => calls.at(-1)!.body as Uint8Array;
   try {
     sender.updateActivity(busy); sender.select(frame("write")); await flush();
     await advance(6000); assertPhase(last(), "WRITING 00:06");
-    sender.select(frame("grandma")); await flush(); assertPhase(last(), "GRANDMA");
+    sender.select(frame("grandma")); await flush(); assertPhase(last(), "NO TASK");
     const count = calls.length;
-    await advance(600000); assertPhase(last(), "GRANDMA");
+    await advance(600000); assertPhase(last(), "NO TASK");
     assert.equal(calls.length, count, "grandma has no elapsed-driven deliveries");
-    assertPhase(prepareDisplayImage(base64, { ...busy, state: "grandma", phaseElapsedSeconds: 600 }), "GRANDMA");
+    assertPhase(prepareDisplayImage(base64, { ...busy, state: "grandma", phaseElapsedSeconds: 600 }), "NO TASK");
     sender.select(frame("write")); await flush(); assertPhase(last(), "WRITING");
     await advance(5000); assertPhase(last(), "WRITING");
     await advance(1000); assertPhase(last(), "WRITING 00:06");
@@ -171,7 +171,7 @@ test("a visible IDLE phase gains an elapsed clock while subagents run and clears
 test("both ambient phases time only while subagents run: table", async t => {
   const advance = virtualTime(t);
   for (const state of ["idle", "grandma"] as const) {
-    const label = state === "idle" ? "IDLE" : "GRANDMA";
+    const label = state === "idle" ? "IDLE" : "NO TASK";
     const calls: RequestInit[] = [];
     const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
     const last = () => calls.at(-1)!.body as Uint8Array;

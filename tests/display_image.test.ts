@@ -240,9 +240,9 @@ test("error at idle with running subagents shows red SUBAGENTS with a yellow cou
   assert.deepEqual(image.data.slice(59 * 64 * 4), plain.data.slice(59 * 64 * 4), "bottom padding is unchanged");
 });
 
-test("explicit elapsed times render on IDLE and GRANDMA only while subagents are active", () => {
+test("explicit elapsed times render on IDLE and NO TASK only while subagents are active", () => {
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
-  for (const [state, label] of [["idle", "IDLE"], ["grandma", "GRANDMA"]] as const) {
+  for (const [state, label] of [["idle", "IDLE"], ["grandma", "NO TASK"]] as const) {
     const timed = decodePng(prepareDisplayImage(base64, {
       status: "busy", phase: "thinking", activeSubagents: 1, state, phaseElapsedSeconds: 38,
     }));
@@ -434,7 +434,7 @@ const expectedStateLabels: Record<(typeof EMOTE_STATES)[number], string> = {
   hi: "HI", idle: "IDLE", think: "THINKING", talk: "TALKING",
   read: "READING", write: "WRITING", tool: "TOOL",
   success: "SUCCESS", failure: "FAILURE", compact: "COMPACTING",
-  ask: "ASKING", grandma: "GRANDMA", bye: "BYE",
+  ask: "ASKING", grandma: "NO TASK", bye: "BYE",
   delegate: "DELEGATING", jobs: "JOBS", remember: "REMEMBERING",
   yolo: "YOLO", "super-yolo": "SUPER-YOLO", explore: "EXPLORING",
   build: "BUILDING", verify: "VERIFYING", judge: "JUDGING",
