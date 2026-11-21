@@ -163,6 +163,8 @@ Any new prompt cancels a preview, so the avatar always follows the real agent.
 ### Avatar selection
 
 Run `/emote avatar minecraft` (or another available folder) to switch without `/reload`.
+Sets shipped with the extension are selectable the same way: `/emote avatar gentleemotex`
+switches to the included `gentleemotex` character. Tab completion lists every usable folder.
 The choice is saved as a folder-name string in `<agent dir>/extensions/gentle-emote/avatar.json`,
 independently of `config.json` and output preferences. It survives restarts and project changes;
 already-running sessions restore it on their next start/reload. Manual selection wins over model

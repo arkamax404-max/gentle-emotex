@@ -41,7 +41,7 @@ test("avatar command persists globally, rejects paths without mutation, and auto
     assert.equal(readFileSync(path, "utf8"), '"gentleled"\n');
     assert.match(await status(), /set=gentleled;/);
     assert.deepEqual(command().getArgumentCompletions("avatar gen").map((x: any) => x.value),
-      ["avatar gentleled", "avatar gentleman", "avatar gentleman-yolo"]);
+      ["avatar gentleemotex", "avatar gentleled", "avatar gentleman", "avatar gentleman-yolo"]);
     assert.ok(command().getArgumentCompletions("avatar ").some((x: any) => x.value === "avatar auto"));
     await run("avatar");
     assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] avatar: gentleled; /emote avatar <folder> | auto", level: "info" });
