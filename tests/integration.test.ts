@@ -1764,6 +1764,200 @@ test("usbOn reports a claim rejection and a failed claim write", async () => {
   }
 });
 
+test("bare usbOn offers a metadata selector for several ports and opens the exact chosen path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-select-"));
+  const profile = join(root, "profile");
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "usb.json");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const opened: string[] = [];
+    let listCalls = 0;
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({
+      list: async () => { listCalls += 1; return [
+        // A macOS-style device name the CLI validator would reject: OS-discovered
+        // paths must be opened as enumerated, never re-validated.
+        { path: "/dev/cu.usbmodem14201", friendlyName: "Gentle LED Panel", manufacturer: "Arduino\u0007 (fake\u001b[31m)", serialNumber: "SN123", vendorId: "2341", productId: "0043" },
+        { path: "COM7" },
+      ]; },
+      open: async (path: string) => { opened.push(path); return peer.port; },
+    });
+    const emote = lab.commands.get("emote");
+    // Default answer is cancel, so run once without a choice first: cancel
+    // leaves every piece of live truth untouched.
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, 1, "several ports ask the interactive user");
+    assert.equal(lab.selectCalls[0]!.title, "USB serial display");
+    assert.equal(lab.selectCalls[0]!.options.length, 2);
+    const labelled = lab.selectCalls[0]!.options[0]!;
+    assert.ok(labelled.includes("/dev/cu.usbmodem14201"), "the label names the OS path");
+    assert.ok(labelled.includes("Gentle LED Panel") && labelled.includes("SN123"), "optional metadata is offered");
+    assert.ok(labelled.includes("Arduino (fake)"), "the manufacturer is readable");
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(labelled), "control sequences are sanitized before TUI render");
+    assert.ok(labelled.includes("2341:0043"), "vendor and product ids are offered");
+    assert.equal(lab.selectCalls[0]!.options[1], "COM7", "a bare port shows its path alone");
+    assert.deepEqual(opened, [], "cancelling opens nothing");
+    assert.equal(lab.notices.at(-1)?.level, "warning");
+    assert.match(lab.notices.at(-1)?.message ?? "", /usb serial display unchanged/);
+    assert.equal(existsSync(savedState), false, "cancelling never persists On");
+
+    // Choosing the first entry opens exactly the enumerated path.
+    lab.selectControl.choice = lab.selectCalls[0]!.options[0]!;
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, 2, "the cancelled attempt is not remembered as a choice");
+    assert.deepEqual(opened, ["/dev/cu.usbmodem14201"], "the selected original path is opened directly");
+    assert.ok(lab.notices.some(n => /usb serial display: \/dev\/cu.usbmodem14201/.test(n.message)), "the chosen path is confirmed");
+    assert.equal(JSON.parse(readFileSync(savedState, "utf8")), true, "a successful selection persists On");
+    // Every rule keeps its scope: only the two bare commands enumerated.
+    assert.equal(listCalls, 2, "each bare command enumerates once, without duplicate listing");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed selected open keeps the session port unremembered; a successful one is reused after usbOff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-remember-"));
+  const profile = join(root, "profile");
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "usb.json");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    let failOpen = true;
+    const opened: string[] = [];
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({
+      list: async () => [{ path: "/dev/cu.usbmodem14201" }, { path: "COM7" }],
+      open: async (path: string) => {
+        opened.push(path);
+        if (failOpen) throw new Error("device busy");
+        return peer.port;
+      },
+    });
+    const emote = lab.commands.get("emote");
+    failOpen = true;
+
+    // A selection whose open fails must not become the session's remembered port.
+    lab.selectControl.choice = "/dev/cu.usbmodem14201";
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.match(lab.notices.at(-1)?.message ?? "", /cannot open \/dev\/cu.usbmodem14201.*unchanged/);
+    assert.equal(existsSync(savedState), false, "a failed open never persists On");
+    // The failed port is not remembered: the selector is offered again.
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, 2, "a failed selected open is not remembered");
+    failOpen = false;
+    lab.selectControl.choice = "COM7";
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, 3, "the third command is the first successful choice");
+    assert.equal(opened.at(-1), "COM7", "the chosen port is the one that opens");
+    const remembered = lab.selectCalls.length;
+    // usbOff keeps the session choice: bare usbOn reuses it without prompting.
+    await emote.handler("usbOff", lab.ctx);
+    await drain();
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, remembered, "the remembered session port is reused after usbOff");
+    assert.equal(opened.at(-1), "COM7");
+    // An explicit port bypasses the selector and replaces the remembered one.
+    const before = lab.selectCalls.length;
+    await emote.handler("usbOff", lab.ctx);
+    await drain();
+    await emote.handler("usbOn COM9", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, before, "an explicit port never shows the selector");
+    assert.equal(opened.at(-1), "COM9");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("one visible port connects without a selector and headless multi keeps the refusal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-one-"));
+  const profile = join(root, "profile");
+  const savedState = join(profile, "extensions", "gentle-emote", "output-states", "usb.json");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const opened: string[] = [];
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({
+      list: async () => [{ path: "COM5" }],
+      open: async (path: string) => { opened.push(path); return peer.port; },
+    });
+    const emote = lab.commands.get("emote");
+    await emote.handler("usbOn", lab.ctx);
+    await drain();
+    assert.equal(lab.selectCalls.length, 0, "a single candidate never prompts");
+    assert.deepEqual(opened, ["COM5"], "the single display connects directly");
+    await lab.shutdown();
+    lab.restore();
+    lab = undefined;
+
+    // Without a selector UI, several ports keep the transport refusal and open
+    // nothing: the warning the CLI always gave.
+    const profile2 = join(root, "profile2");
+    lab = await boot(root, [], profile2);
+    const headless = { ...lab.ctx, ui: { ...lab.ctx.ui, select: undefined } } as any;
+    const headlessOpen: string[] = [];
+    useSerialSystemDeps({
+      list: async () => [{ path: "COM5" }, { path: "COM7" }],
+      open: async (path: string) => { headlessOpen.push(path); return peer.port; },
+    });
+    const refuse = lab.commands.get("emote");
+    await refuse.handler("usbOn", headless);
+    await drain();
+    assert.deepEqual(lab.selectCalls, [], "no modal without a selector UI");
+    assert.deepEqual(headlessOpen, [], "refused ambiguity opens nothing");
+    assert.match(lab.notices.at(-1)?.message ?? "", /more than one serial port is visible/);
+    assert.equal(lab.notices.at(-1)?.level, "warning");
+    const savedState2 = join(profile2, "extensions", "gentle-emote", "output-states", "usb.json");
+    assert.equal(existsSync(savedState2), false, "the refusal persists nothing");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the session_start usb auto-restore never opens a selector modal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-restore-"));
+  const profile = join(root, "profile");
+  const stateDir = join(profile, "extensions", "gentle-emote", "output-states");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "usb.json"), "true\n");
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], profile);
+    const opened: string[] = [];
+    const peer = fakeCdcPort();
+    useSerialSystemDeps({
+      list: async () => [{ path: "COM5" }, { path: "COM7" }],
+      open: async (path: string) => { opened.push(path); return peer.port; },
+    });
+    // The choice is pre-set: if the restore ever prompted, it would open.
+    lab.selectControl.choice = "COM5";
+    await lab.emit("session_start");
+    await drain();
+    assert.deepEqual(lab.selectCalls, [], "an automatic restore never prompts");
+    assert.deepEqual(opened, [], "ambiguity during restore opens nothing");
+    assert.match(lab.notices.at(-1)?.message ?? "", /more than one serial port is visible/);
+    assert.equal(lab.notices.at(-1)?.level, "warning");
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // --- USB layout parity with the HTTP LED composition (outline + title) ---
 
 /** Solid opaque sprite with no accent-key pixels, so the frame base64 stays byte-identical. */
