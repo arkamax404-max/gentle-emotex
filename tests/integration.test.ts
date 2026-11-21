@@ -2116,6 +2116,48 @@ async function bootUsbLayoutLab(root: string, outline?: string) {
   return { lab, peer, emote: lab.commands.get("emote") };
 }
 
+test("usbOn forces opaque physical frames despite transparentBackground true", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-opaque-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  const sprite = encodePng({ width: 4, height: 1, data: new Uint8Array([
+    80, 40, 20, 0, 200, 100, 50, 128, 20, 60, 100, 255, 0, 0, 0, 255,
+  ]) });
+  mkdirSync(join(dir, "emotes", "ledsprite", "think"), { recursive: true });
+  writeFileSync(join(dir, "emotes", "ledsprite", "think", "think.png"), sprite);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    emotes: [{ model: "*", "emote-set": "ledsprite" }],
+    externalDisplay: { transparentBackground: true, background: "#404040" },
+  }));
+  const peer = fakeCdcPort();
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, [], join(root, "profile"));
+    useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
+    const emote = lab.commands.get("emote");
+    await emote.handler("usbOn", lab.ctx); await drain();
+    await emote.handler("think", lab.ctx); await drain();
+    const frames = peer.frames.filter(frame => frame[5] === 0);
+    assert.ok(frames.length > 0, "the public command delivers an actual serial image frame");
+    const payload = usbImagePayload(frames.at(-1)!);
+    const image = decodePng(payload);
+    assert.deepEqual([image.width, image.height], [64, 64]);
+    let blended = false;
+    for (let i = 0; i < image.data.length; i += 4) {
+      assert.equal(image.data[i + 3], 255, "all physical pixels, including padding, must be opaque");
+      if (image.data[i] === 132 && image.data[i + 1] === 82 && image.data[i + 2] === 57) blended = true;
+    }
+    assert.ok(blended, "partial-alpha artwork is composited against the configured RGB background");
+    assert.ok(payload.equals(prepareDisplayImage(sprite.toString("base64"),
+      { status: "idle", phase: "idle", activeSubagents: 0, state: "think" },
+      "#404040", 1, "#ffffff", false, basename(root), USB_LED_INK)),
+    "USB keeps its outline, title, labels and exact opaque composition");
+    assert.equal(new OutputStateStore(join(root, "profile")).load(message => assert.fail(message)).usb, true);
+  } finally {
+    await lab?.shutdown(); lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("usbOn composes the same LED outline as displayOn: white by default, configured color overrides", async () => {
   const root = mkdtempSync(join(tmpdir(), "emote-usb-outline-"));
   let lab: Awaited<ReturnType<typeof boot>> | undefined;

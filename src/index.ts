@@ -668,7 +668,7 @@ export default function (pi: ExtensionAPI) {
         config.externalDisplay.background,
         config.externalDisplay.backgroundCoverage,
         config.externalDisplay.outline ?? "#ffffff",
-        config.externalDisplay.transparentBackground,
+        false, // Physical CDC displays always receive opaque PNGs.
         title !== null && encodeProjectName(title) !== null ? title : null,
         band === "red" ? [255, 0, 0] : band === "yellow" ? [255, 255, 0] : [0, 255, 0],
       );

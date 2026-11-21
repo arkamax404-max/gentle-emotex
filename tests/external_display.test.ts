@@ -320,6 +320,38 @@ test("avatar HTTP delivery inherits transparency per target and honors an explic
   } finally { sender.dispose(); }
 });
 
+test("physical HTTP targets stay opaque despite transparency while loopback RGBA is preserved", async () => {
+  const source = new Uint8Array([80, 40, 20, 0, 200, 100, 50, 128, 20, 60, 100, 255, 0, 0, 0, 255]);
+  for (const url of ["http://matrix/emote", options.url, "http://127.0.0.1:8003/emote"]) {
+    for (const grouped of [false, true]) {
+      const calls: RequestInit[] = [];
+      const target = { ...options, url };
+      const config = { ...target, transparentBackground: true, background: "#404040",
+        ...(grouped ? { targets: [target] } : {}) };
+      const sender = new ExternalDisplays(config, async (_url, init) => { calls.push(init!); return new Response(); });
+      try {
+        sender.select({ ...frame(), base64: encodePng({ width: 4, height: 1, data: source }).toString("base64") });
+        await tick();
+        assert.equal(calls.length, 1, `${url}/${grouped}: exactly one frame`);
+        const image = decodePng(Buffer.from(calls[0]!.body as Uint8Array));
+        assert.deepEqual([image.width, image.height], [64, 64]);
+        const loopback = isLoopbackDisplayUrl(url);
+        assert.equal(image.data[3], loopback ? 0 : 255, "physical padding cannot inherit transparent canvas");
+        const center = (19 * 64 + 31) * 4;
+        assert.deepEqual([...image.data.slice(center, center + 4)], loopback ? [200, 100, 50, 128] : [132, 82, 57, 255]);
+        const black = (19 * 64 + 33) * 4;
+        assert.deepEqual([...image.data.slice(black, black + 4)], [0, 0, 0, 255], "opaque black is never chromakeyed");
+        if (!loopback) for (let i = 3; i < image.data.length; i += 4) assert.equal(image.data[i], 255);
+        const headers = new Headers(calls[0]!.headers);
+        assert.equal(calls[0]!.method, "POST");
+        assert.equal(headers.get("Content-Type"), "image/png");
+        assert.equal(headers.get("X-Emote-Sequence"), "1");
+        assert.equal(headers.get("X-Emote-State"), "idle");
+      } finally { sender.dispose(); }
+    }
+  }
+});
+
 test("background inherits per target, overrides independently, and rejects invalid colors", async () => {
   for (const background of [null, 123, "gray", "#fff", "#000000\r\n"]) {
     assert.equal(normalizeExternalDisplay({ ...options, background }), null);
