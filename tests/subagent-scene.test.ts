@@ -265,6 +265,11 @@ test("default child selection: gentleled, or gentleman when gentleled is the par
     mkdirSync(join(dir, "emotes", "custom", "idle"), { recursive: true });
     writeFileSync(join(dir, "emotes", "custom", "idle", "idle.png"), png());
     lab = await sceneLab(root, { emotes: [{ model: "*", "emote-set": "custom" }] });
+    // Deterministic synchronization, not a sleep: a turn boundary cancels the
+    // 500ms startup greeting exactly like production, so the greeting can never
+    // fire after the swap and yield the scene back to the parent's set (the
+    // scene only exists while the parent rests in idle).
+    await lab.emit("agent_start");
     await lab.emit("agent_end");
     lab.emitBus(SUBAGENT_CHANNEL, subagentEvent("queued", 1));
     await wait(30);
@@ -272,6 +277,7 @@ test("default child selection: gentleled, or gentleman when gentleled is the par
     await lab.shutdown(); lab.restore(); calls.length = 0; lab = undefined;
 
     lab = await sceneLab(root, { emotes: [{ model: "*", "emote-set": "gentleled" }] });
+    await lab.emit("agent_start");
     await lab.emit("agent_end");
     lab.emitBus(SUBAGENT_CHANNEL, subagentEvent("queued", 1));
     await wait(30);
