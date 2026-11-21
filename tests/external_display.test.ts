@@ -487,7 +487,12 @@ test("raw PNG protocol, image+metadata dedup, bounded latest pending, invalid ID
   assert.equal(new Headers(calls[1]!.headers).get("X-Emote-Frame"), "latest.png");
   assert.equal(new Headers(calls[1]!.headers).get("X-Emote-Sequence"), "2");
   for (const bad of ["../secret.png", "é.png", "x\r\ny", "x\n", "a".repeat(129)]) sender.select(frame(bad));
-  assert.equal(reports.length, 5);
+  assert.equal(reports.length, 0, "the unsupported-frame report is silent by default");
+  assert.equal(calls.length, 2, "an unsupported identifier still sends no frame");
+  sender.setFrameWarningEnabled(true);
+  for (const bad of ["../secret.png", "é.png", "x\r\ny", "x\n", "a".repeat(129)]) sender.select(frame(bad));
+  assert.equal(reports.length, 5, "opting in shows the routine report once per invalid selection");
+  assert.equal(calls.length, 2, "showing the report still sends no frame");
   done.shift()!(); await tick();
   sender.select(frame("latest.png")); assert.equal(calls.length, 2);
   sender.select({ ...frame("latest.png"), state: "think" }); assert.equal(calls.length, 3);
@@ -1098,4 +1103,42 @@ test("an explicit displayOn that cannot claim warns once and keeps ordinary deli
       assert.deepEqual(calls, [url], "ordinary delivery continues");
     } finally { sender.dispose(); }
   }
+});
+
+test("unsupported-frame reports are opt-in per session on every destination; unrelated warnings stay visible", async () => {
+  const calls: RequestInit[] = [];
+  const reports: string[] = [];
+  const sender = new ExternalDisplays({ ...options, targets: [options, { ...options, url: "http://matrix/emote" }] },
+    async (_url, init) => { calls.push(init!); return new Response(); }, message => reports.push(message));
+  try {
+    sender.select(frame("a b.png"));
+    await tick();
+    assert.equal(calls.length, 0, "an invalid frame identifier still sends no frame");
+    assert.equal(reports.length, 0, "default off: no routine unsupported-frame report");
+    sender.setFrameWarningEnabled(true);
+    sender.select(frame("x\r\ny"));
+    await tick();
+    assert.equal(calls.length, 0, "showing the report never invents a frame request");
+    assert.deepEqual(reports, [
+      "destination 1: externalDisplay: unsupported frame identifier; skipped",
+      "destination 2: externalDisplay: unsupported frame identifier; skipped",
+    ]);
+    sender.setFrameWarningEnabled(false);
+    sender.select(frame("../secret.png"));
+    await tick();
+    assert.equal(reports.length, 2, "turning the diagnostic off hides the routine report again");
+  } finally { sender.dispose(); }
+  // The toggle only governs the routine report: other diagnostics stay visible even off.
+  const badConfigReports: string[] = [];
+  let configured = 0;
+  const bad = new ExternalDisplay({ enabled: true, url: "http://127.0.0.1:8001/emote", timeoutMs: 0 },
+    async () => { configured++; return new Response(); },
+    message => badConfigReports.push(message));
+  try {
+    bad.setFrameWarningEnabled(false);
+    bad.select(frame());
+    await tick();
+    assert.deepEqual(badConfigReports, ["externalDisplay: invalid configuration; disabled"]);
+    assert.equal(configured, 0, "invalid configuration never reached the network");
+  } finally { bad.dispose(); }
 });

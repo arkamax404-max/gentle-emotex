@@ -114,6 +114,8 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   internalOn: "show the terminal avatar (external delivery stays active)",
   internalOff: "hide the terminal avatar (external delivery stays active)",
   status: "show the last selected PNG, work phase source and activity snapshot (read-only diagnostic)",
+  debugOn: "show the routine unsupported-frame reports (session-local diagnostic; delivery unchanged)",
+  debugOff: "hide the routine unsupported-frame reports again (session-local diagnostic; default)",
   localOn: "resume delivery to configured localhost simulators",
   localOff: "pause localhost delivery without affecting the ESP32",
   d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003 and relay Herdr panel-focus ACKs when Herdr context exists; d200On <port> uses that port for this session only",
@@ -235,6 +237,18 @@ export default function (pi: ExtensionAPI) {
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
+  /** Session-local diagnostic visibility of the routine unsupported-frame report.
+   * `/emote debugOn|debugOff` control only this: they never persist, never touch the
+   * saved "debug" output state (that is /emote localOn|localOff) and never gate the
+   * debug.log file switch, which `config.debug` alone drives. Every new session and
+   * every /reload starts this off; new senders inherit the live flag. */
+  let frameWarningsOn = false;
+
+  /** Propagate the session-local diagnostic toggle to every live display sender. */
+  function applyFrameWarnings(): void {
+    externalDisplay?.setFrameWarningEnabled(frameWarningsOn);
+    d200Display?.setFrameWarningEnabled(frameWarningsOn);
+  }
 
   /** Host usage is optional on older Pi versions; never infer context from text. */
   function refreshContextUsage(ctx: any): void {
@@ -753,6 +767,7 @@ export default function (pi: ExtensionAPI) {
         focusRequest: desktopFocusRequest(),
       });
       d200LivePort = port;
+      d200Display.setFrameWarningEnabled(frameWarningsOn);
       if (projectTitle !== null) d200Display.setTitle(projectTitle);
       refreshContextUsage(ctx);
       d200Display.updateActivity(displayActivity.snapshot());
@@ -1320,6 +1335,8 @@ export default function (pi: ExtensionAPI) {
         const savedStates = outputState.load(report);
         externalDisplay?.setDebugEnabled(savedStates.debug);
         externalDisplay?.setDisplayEnabled(savedStates.display);
+        // A rebuilt sender inherits the live session diagnostic, like every other one.
+        externalDisplay?.setFrameWarningEnabled(frameWarningsOn);
         renderer.setFrameSink?.(frameSink());
         // A fresh sender retains no frame, so the reservation comes first and the
         // current selection is pushed through the existing animation pipeline.
@@ -1390,6 +1407,16 @@ export default function (pi: ExtensionAPI) {
         setD200Display(name === "d200On", ctx);
         return;
       }
+      if (name === "debugOn" || name === "debugOff") {
+        // Diagnostic-only commands for this session's visibility of the routine
+        // unsupported-frame report. Session-local like the D200 mirror: a new
+        // session or /reload always starts off, and no output is enabled or
+        // disabled, no preference is written and no frame is sent by these.
+        frameWarningsOn = name === "debugOn";
+        applyFrameWarnings();
+        ctx.ui?.notify?.(`[${EXTENSION_NAME}] unsupported-frame warnings ${frameWarningsOn ? "on" : "off"} (session-local)`, "info");
+        return;
+      }
       if (name === "localOn" || name === "localOff") {
         const count = externalDisplay?.setDebugEnabled(name === "localOn") ?? 0;
         if (!count) ctx.ui?.notify?.(`[${EXTENSION_NAME}] no enabled localhost display configured`, "info");
@@ -1442,15 +1469,15 @@ export default function (pi: ExtensionAPI) {
         previewState(name as EmoteState);
         return;
       }
-      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
+      ctx.ui?.notify?.(`[${EXTENSION_NAME}] /emote <state>: ${[...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", "debugOn", "debugOff", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])].join(", ")}`, "info");
   }
 
   pi.registerCommand?.("emote", {
-    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, usbOn with several visible ports offers a picker in the interactive TUI, displayOff releases it)",
+    description: "Gentle-emote: /emote <state> | demo | status | avatar <folder> | avatar auto | title <text> | internalOn | internalOff | localOn | localOff | debugOn | debugOff | d200On [port] | d200Off | usbOn [port] | usbOff | displayOn [address] | displayOff (global, persistent; displayOn claims the LED display for this session, displayOn <address> persists that board as the LED destination, d200On <port> targets that key port for this session only, usbOn with several visible ports offers a picker in the interactive TUI, displayOff releases it, debugOn/debugOff are session-local diagnostics that only show or hide the routine unsupported-frame warning, default off, persisting nothing and never enabling an output)",
     getArgumentCompletions: (prefix: string) => {
       const choices = prefix.trimStart().startsWith("avatar ")
         ? ["avatar auto", ...avatarNames(extDir, cwd).map(name => `avatar ${name}`)]
-        : [...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])];
+        : [...EMOTE_STATES, "demo", "status", "panel", "avatar", "title", "debugOn", "debugOff", ...OUTPUTS.flatMap(output => [`${outputCommandName(output)}On`, `${outputCommandName(output)}Off`])];
       return choices.filter(name => name.startsWith(prefix.trim()))
         .map(name => ({ value: name, label: name, description: name.startsWith("avatar ") ? EMOTE_DESCRIPTIONS.avatar : EMOTE_DESCRIPTIONS[name] }));
     },
@@ -1500,7 +1527,11 @@ export default function (pi: ExtensionAPI) {
     // The port is session-local: a fresh session never inherits another one's choice.
     d200Port = null;
     d200LivePort = null;
+    // The diagnostic warning toggle is also session-local: every session start
+    // (and /reload) resets it, so freshly constructed senders stay silent.
+    frameWarningsOn = false;
     d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName, focusRequest: desktopFocusRequest() }) : null;
+    d200Display?.setFrameWarningEnabled(frameWarningsOn);
     usbDisplay = null;
     usbPort = null;
     stopUsbClock();
