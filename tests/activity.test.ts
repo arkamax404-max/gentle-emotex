@@ -6,6 +6,7 @@ import { Animator } from "../src/animator.ts";
 import { findYoloSetDir } from "../src/emotes.ts";
 import extension, { toolNameToState } from "../src/index.ts";
 import { EMOTE_STATES } from "../src/types.ts";
+import { installNetworkGuard } from "./helpers/network.ts";
 import type { Config, EmoteState } from "../src/types.ts";
 
 test("Gentle Shell activity tools map to their scenes", () => {
@@ -163,6 +164,13 @@ test("extension loading does not call runtime action methods", () => {
 test("the YOLO adapter is only read and observed, never toggled", async () => {
   delete process.env.TMUX;
   process.env.PI_CODING_AGENT_DIR = "/nonexistent/agent";
+  // This test boots a primary session: the delegated-child early return in the
+  // extension factory would otherwise leave it without any handlers.
+  const childMarker = process.env.GENTLE_PI_AGENTS_CHILD;
+  delete process.env.GENTLE_PI_AGENTS_CHILD;
+  // The shipped config enables a loopback receiver and an unsaved local output
+  // defaults on, so the boot must never reach the real network.
+  const network = installNetworkGuard();
   const calls: string[] = [];
   let notify: () => void = () => {};
   let display = "ON";
@@ -198,6 +206,9 @@ test("the YOLO adapter is only read and observed, never toggled", async () => {
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
     await emit("session_shutdown", { reason: "quit" });
+    network.restore();
+    if (childMarker === undefined) delete process.env.GENTLE_PI_AGENTS_CHILD;
+    else process.env.GENTLE_PI_AGENTS_CHILD = childMarker;
   }
   assert.deepEqual(channels, ["gentle:yolo:host-ui"]);
   assert.deepEqual(calls, ["observe", "read", "read", "unobserve", "dispose"]);
