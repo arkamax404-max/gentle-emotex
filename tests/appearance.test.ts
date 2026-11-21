@@ -14,6 +14,77 @@ function fixture(t: any) {
   const agentDir = join(root, "agent"), dir = join(agentDir, "extensions/gentle-emote"), file = join(dir, "appearance.json");
   return { root, agentDir, dir, file, options: { agentDir }, seed(text: string | Uint8Array) { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(file, text, { mode: 0o600 }); } };
 }
+test("unsupported platforms fail closed before creating store paths", async t => {
+  for (const name of ["win32", "missing getuid"]) await t.test(name, async child => {
+    const f = fixture(child);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const getuid = Object.getOwnPropertyDescriptor(process, "getuid");
+    let read, patched;
+    try {
+      Object.defineProperty(process, "platform", { ...platform, value: name === "win32" ? "win32" : "linux" });
+      Object.defineProperty(process, "getuid", { configurable: true, writable: true, value: name === "missing getuid" ? undefined : getuid?.value ?? (() => 0) });
+      read = await readAppearance(f.options);
+      patched = await patchDesktopAppearance(f.options, 0, { backgroundOpacity: 60 });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      if (getuid) Object.defineProperty(process, "getuid", getuid);
+      else Reflect.deleteProperty(process, "getuid");
+    }
+    assert.deepEqual(read, { status: "unsupported-platform" });
+    assert.deepEqual(patched, { status: "unsupported-platform" });
+    assert.equal(existsSync(f.agentDir), false, "no store directories, source, lock or temporary may be created");
+  });
+});
+test("language-neutral version-1 fixtures agree with public reads and patches", async t => {
+  const cases: Array<{ name: string; raw: string; expectedStatus: "ready" | "invalid" }> = JSON.parse(
+    readFileSync(new URL("./fixtures/appearance-v1.json", import.meta.url), "utf8"),
+  );
+  for (const { name, raw, expectedStatus } of cases) await t.test(name, async child => {
+    const f = fixture(child); f.seed(raw); const before = Buffer.from(raw, "utf8");
+    const read = await readAppearance(f.options);
+    assert.equal(read.status, expectedStatus);
+    assert.deepEqual(readFileSync(f.file), before, "reads preserve exact input bytes");
+    if (expectedStatus === "invalid") {
+      assert.deepEqual(read, { status: "invalid" });
+      assert.deepEqual(await patchDesktopAppearance(f.options, 0, { backgroundOpacity: 60 }), { status: "invalid" });
+      assert.deepEqual(readFileSync(f.file), before, "rejected writes preserve bytes and revision");
+      assert.deepEqual(await readAppearance(f.options), { status: "invalid" });
+    } else {
+      const initial = JSON.parse(raw);
+      assert.deepEqual(read.snapshot, initial);
+      assert.equal((await patchDesktopAppearance(f.options, initial.revision, { backgroundOpacity: 60 })).status, "saved");
+      assert.deepEqual((await readAppearance(f.options)).snapshot, {
+        ...initial, revision: initial.revision + 1, desktop: { ...initial.desktop, backgroundOpacity: 60 },
+      }, "successful patch preserves unknown nested members, safe integers and Unicode pairs");
+    }
+    assert.equal(existsSync(`${f.file}.lock`), false);
+  });
+});
+test("container depth counts root as one and bounds unknown nested arrays at 64", async t => {
+  for (const depth of [64, 65]) await t.test(`total depth ${depth}`, async child => {
+    const f = fixture(child);
+    // The root is depth 1; each unknown array contributes one more container.
+    const raw = JSON.stringify(defaults).slice(0, -1) + ',"unknown":' + "[".repeat(depth - 1) + "0" + "]".repeat(depth - 1) + "}";
+    f.seed(raw); const before = readFileSync(f.file);
+    const read = await readAppearance(f.options);
+    assert.equal(read.status, depth === 64 ? "ready" : "invalid");
+    assert.deepEqual(readFileSync(f.file), before);
+    const patched = await patchDesktopAppearance(f.options, 0, { backgroundOpacity: 60 });
+    if (depth === 64) {
+      assert.equal(patched.status, "saved");
+      const initial = JSON.parse(raw);
+      assert.deepEqual((await readAppearance(f.options)).snapshot, {
+        ...initial, revision: 1, desktop: { ...initial.desktop, backgroundOpacity: 60 },
+      }, "patch preserves the complete depth-64 unknown value");
+    } else {
+      assert.deepEqual(read, { status: "invalid" });
+      assert.deepEqual(patched, { status: "invalid" });
+      assert.deepEqual(readFileSync(f.file), before, "rejection leaves bytes and revision unchanged");
+      assert.deepEqual(await readAppearance(f.options), { status: "invalid" });
+    }
+    assert.equal(existsSync(`${f.file}.lock`), false);
+  });
+});
 test("missing read is virtual and save/reload preserves grouped checkbox semantics", async t => {
   const f = fixture(t);
   assert.deepEqual(await readAppearance(f.options), { status: "missing", snapshot: defaults });

@@ -88,11 +88,20 @@ high/low surrogate escapes; accept valid surrogate pairs and literal non-BMP cha
 unknown fields. Invalid input preserves source bytes and disables writes; no repair,
 truncation, automatic migration/import or deletion of legacy settings is permitted.
 
+`MAX_CONTAINER_DEPTH` is **64**, counting the root object as depth **1**. Every nested
+object or array adds one; scalar values add no container depth. This includes unknown
+and reserved fields. Total depth 64 is valid; opening a container at depth 65 is
+`invalid`, rejected by the lexical pass before recursive document parsing or serialization.
+For example, a root `unknown` value containing 63 arrays around scalar `0` reaches
+exactly depth 64; 64 such arrays reach depth 65 and must be rejected. Rejected writes
+preserve source bytes and revision and leave no owned lock remnants.
+
 The TypeScript API returns typed status/snapshot results: `readAppearance(options)`
 returns `missing` with virtual defaults or `ready` with confirmed data. Errors return
 no snapshot. `patchDesktopAppearance(options, expectedRevision, patch)` returns `saved`,
 `conflict` with current truth, `revision-exhausted`, `busy`, `invalid`, `unsafe-path`,
-`io-error`, or `committed-durability-uncertain`; cleanup failure is a separate flag.
+`unsupported-platform`, `io-error`, or `committed-durability-uncertain`; cleanup failure
+is a separate flag.
 Importing the module has no global side effects. It owns neither UI nor polling.
 
 Desktop retains its last confirmed snapshot on errors, or uses visibly unconfirmed
@@ -137,8 +146,11 @@ hex characters. Owner bytes are exactly `v1:<token>\n` (36 bytes).
    guarded lock cleanup independently, even if checking or removing the temporary fails;
    cleanup failures must not replace the transaction's original status or snapshot.
 
-A crash can leave the lock indefinitely. Applications never delete abandoned locks or
-orphan temps. Operator recovery is explicit, only after both applications and all writers
+A crash can leave the lock indefinitely. Successful creation followed by failure to
+capture the created object's identity has the same conservative outcome: leave it in
+place and report cleanup/recovery needs; never unlink without proven ownership.
+This branch has not been fault-injected in both implementations. Applications never
+delete abandoned locks or orphan temps. Operator recovery is explicit, only after both applications and all writers
 have stopped. Readers need no lock because writers replace complete files.
 
 ## Filesystem trust boundary
@@ -152,6 +164,14 @@ path metadata. Recheck before rename/unlink. Do not create anything merely to re
 
 This POSIX implementation is for cooperating same-user applications in trusted directories,
 **not hostile-local-writer protection**: metadata/open and metadata/unlink checks have TOCTOU
-windows. Windows ACL/atomic-replacement details require a platform supplement before
-claiming equivalent support. Stronger descriptor-relative sandboxing is out of scope.
+windows. The TypeScript store fails closed on `process.platform === "win32"` or when
+`process.getuid` is unavailable: both public read and patch APIs return the distinct
+`unsupported-platform` status without a snapshot, before resolving paths or accessing
+the filesystem. The pure path resolver remains available. No fallback, legacy write,
+or change to existing RGB/PNG/desktop runtime behavior is introduced.
+
+**Windows shared-store support remains pending**, not completed or abandoned: ACL and
+atomic-replacement enforcement require a platform supplement and implementation before
+the gate can be lifted. POSIX mode checks alone do not establish Windows safety. Stronger
+descriptor-relative sandboxing is out of scope.
 Before commit, errors leave source bytes unchanged. Never reset to defaults on failure.

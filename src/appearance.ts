@@ -8,9 +8,11 @@ import { setTimeout as delay } from "node:timers/promises";
 export interface AppearanceOptions { agentDir?: string; env?: Record<string, string | undefined> }
 export interface DesktopAppearance { backgroundRgb: [number, number, number]; backgroundOpacity: number; transparentBackground: boolean }
 export interface AppearanceSnapshot { version: 1; revision: number; desktop: DesktopAppearance; [key: string]: unknown }
-export type AppearanceStatus = "ready" | "missing" | "saved" | "invalid" | "unsafe-path" | "io-error" | "busy" | "conflict" | "revision-exhausted" | "committed-durability-uncertain";
+export type AppearanceStatus = "ready" | "missing" | "saved" | "invalid" | "unsafe-path" | "unsupported-platform" | "io-error" | "busy" | "conflict" | "revision-exhausted" | "committed-durability-uncertain";
 export interface AppearanceResult { status: AppearanceStatus; snapshot?: AppearanceSnapshot; cleanupError?: boolean }
 const CAP = 65536;
+const MAX_CONTAINER_DEPTH = 64;
+const supportedPlatform = () => process.platform !== "win32" && typeof process.getuid === "function";
 const leaves = ["backgroundRgb", "backgroundOpacity", "transparentBackground"];
 const defaults = (): AppearanceSnapshot => ({ version: 1, revision: 0, desktop: { backgroundRgb: [0, 0, 0], backgroundOpacity: 55, transparentBackground: true } });
 class Failure extends Error {
@@ -87,8 +89,11 @@ function decode(bytes: Buffer): AppearanceSnapshot {
       tokens.lastIndex = pos; const match = tokens.exec(text);
       if (!match) fail("invalid");
       const token = match![0]; pos = tokens.lastIndex;
-      if (token === "{") stack.push(new Set());
-      else if (token === "[") stack.push(null);
+      if (token === "{" || token === "[") {
+        // Root object is depth 1; reject the next container before recursive parsing.
+        if (stack.length >= MAX_CONTAINER_DEPTH) fail("invalid");
+        stack.push(token === "{" ? new Set() : null);
+      }
       else if (token === "}" || token === "]") stack.pop();
       else if (token.startsWith('"')) {
         const decoded = JSON.parse(token) as string;
@@ -116,6 +121,7 @@ async function snapshot(agentDir: string, file: string): Promise<AppearanceResul
 }
 /** No filesystem mutation, defaults only on absence; errors never masquerade as defaults. */
 export async function readAppearance(options: AppearanceOptions = {}): Promise<AppearanceResult> {
+  if (!supportedPlatform()) return { status: "unsupported-platform" };
   try {
     const agentDir = resolveAppearanceAgentDir(options);
     return await snapshot(agentDir, join(agentDir, "extensions", "gentle-emote", "appearance.json"));
@@ -124,6 +130,7 @@ export async function readAppearance(options: AppearanceOptions = {}): Promise<A
 
 /** Narrow desktop leaf transaction. Conflicts return fresh truth, never auto-rebase. */
 export async function patchDesktopAppearance(options: AppearanceOptions, expectedRevision: number, patch: Partial<DesktopAppearance>): Promise<AppearanceResult> {
+  if (!supportedPlatform()) return { status: "unsupported-platform" };
   let outcome: AppearanceResult = { status: "io-error" };
   let lock: string | undefined, lockIdentity: Stats | undefined, ownerIdentity: Stats | undefined;
   let temp: string | undefined, tempIdentity: Stats | undefined;
