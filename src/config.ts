@@ -93,6 +93,42 @@ function mergeTerminals(...layers: (TerminalMapping[] | undefined)[]): TerminalM
   return result.size > 0 ? [...result.values()] : DEFAULTS.terminals;
 }
 
+const GLOBAL_PNG_KEYS = ["transparentBackground", "background", "backgroundCoverage"] as const;
+
+/** Keep PNG preferences global without changing project destination/clock precedence. */
+function applyGlobalDisplayAppearance(destination: any, global: any): any {
+  const object = (value: any) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!object(destination)) return destination; // Invalid/null routing must still fail closed.
+  const appearance = (target: any, source: any): any => {
+    if (!object(target)) return target;
+    const result = { ...target };
+    for (const key of GLOBAL_PNG_KEYS) {
+      delete result[key];
+      if (object(source) && Object.hasOwn(source, key)) result[key] = source[key];
+    }
+    return result;
+  };
+  const urlKey = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    try { return new URL(value).href; } catch { return undefined; }
+  };
+  const result = appearance(destination, global);
+  if (Array.isArray(destination.targets)) {
+    const byUrl = new Map<string, any>();
+    if (object(global) && Array.isArray(global.targets)) {
+      for (const target of global.targets) {
+        const key = object(target) ? urlKey(target.url) : undefined;
+        if (key !== undefined) byUrl.set(key, target);
+      }
+    }
+    result.targets = destination.targets.map((target: any) => {
+      const key = object(target) ? urlKey(target.url) : undefined;
+      return appearance(target, key === undefined ? undefined : byUrl.get(key));
+    });
+  }
+  return result;
+}
+
 export function loadLayeredConfig(extDir: string, cwd: string): ConfigResult {
   // Layer 1: Extension config (lowest priority)
   const extConfig = loadJsonFile(join(extDir, "config.json"));
@@ -123,7 +159,9 @@ export function loadLayeredConfig(extDir: string, cwd: string): ConfigResult {
     delete merged.externalDisplay.targets;
   }
   if (userConfig) merged = deepMerge(merged, userConfig);
+  const globalDisplay = merged.externalDisplay;
   if (projectConfig) merged = deepMerge(merged, projectConfig);
+  merged.externalDisplay = applyGlobalDisplayAppearance(merged.externalDisplay, globalDisplay);
 
   // "emotes" — append arrays in priority order (last match wins)
   merged.emotes = mergeEmotes(

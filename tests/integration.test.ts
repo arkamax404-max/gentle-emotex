@@ -1781,7 +1781,8 @@ test("usbOn reports image composition failures once per cause", async () => {
   const profile = join(root, "profile");
   const project = join(root, "project");
   mkdirSync(join(project, ".pi", "extensions", "gentle-emote"), { recursive: true });
-  writeFileSync(join(project, ".pi", "extensions", "gentle-emote", "config.json"),
+  mkdirSync(join(profile, "extensions", "gentle-emote"), { recursive: true });
+  writeFileSync(join(profile, "extensions", "gentle-emote", "config.json"),
     JSON.stringify({ externalDisplay: { background: "gray", transparentBackground: true } }));
   let lab: Awaited<ReturnType<typeof boot>> | undefined;
   try {
@@ -2124,8 +2125,10 @@ test("usbOn forces opaque physical frames despite transparentBackground true", a
   ]) });
   mkdirSync(join(dir, "emotes", "ledsprite", "think"), { recursive: true });
   writeFileSync(join(dir, "emotes", "ledsprite", "think", "think.png"), sprite);
-  writeFileSync(join(dir, "config.json"), JSON.stringify({
-    emotes: [{ model: "*", "emote-set": "ledsprite" }],
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ emotes: [{ model: "*", "emote-set": "ledsprite" }] }));
+  const globalDir = join(root, "profile", "extensions", "gentle-emote");
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "config.json"), JSON.stringify({
     externalDisplay: { transparentBackground: true, background: "#404040" },
   }));
   const peer = fakeCdcPort();

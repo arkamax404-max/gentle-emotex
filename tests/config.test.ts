@@ -133,7 +133,7 @@ test("external display defaults off, layered fields merge, existing size and ter
   }
 });
 
-test("transparentBackground merges across config layers and preserves an explicit false", () => {
+test("PNG appearance stays user-global while project clock settings remain layered", () => {
   const root = mkdtempSync(join(tmpdir(), "emote-transparent-config-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   const ext = join(root, "extension"), agent = join(root, "agent"), project = join(root, "project");
@@ -144,15 +144,90 @@ test("transparentBackground merges across config layers and preserves an explici
   try {
     const target = { enabled: true, url: "http://localhost/emote" };
     writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { ...target, idleClock: "off" } }));
-    writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: true, idleClock: "receiver" } }));
-    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { background: "#404040" } }));
+    const appearance = { transparentBackground: true, background: "#202020", backgroundCoverage: 0.5 };
+    writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { ...appearance, idleClock: "receiver" } }));
+    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { background: "#404040", backgroundCoverage: 0 } }));
     assert.deepEqual(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), {
-      ...target, timeoutMs: 1000, background: "#404040", transparentBackground: true, idleClock: "receiver",
+      ...target, timeoutMs: 1000, ...appearance, idleClock: "receiver",
     });
     writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: false, idleClock: "silence" } }));
     assert.deepEqual(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), {
-      ...target, timeoutMs: 1000, transparentBackground: false, idleClock: "silence",
+      ...target, timeoutMs: 1000, ...appearance, idleClock: "silence",
     });
+    writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { ...appearance, transparentBackground: false } }));
+    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { transparentBackground: true } }));
+    const before = [join(user, "config.json"), join(local, "config.json")].map(path => readFileSync(path, "utf8"));
+    assert.equal(loadLayeredConfig(ext, project).config.externalDisplay.transparentBackground, false,
+      "a global false cannot be re-enabled by a project");
+    assert.deepEqual([join(user, "config.json"), join(local, "config.json")].map(path => readFileSync(path, "utf8")), before,
+      "loading preferences never rewrites either configuration layer");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("per-target PNG appearance follows global URL identity without changing project routes", () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-global-targets-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const ext = join(root, "extension"), agent = join(root, "agent"), project = join(root, "project");
+  const user = join(agent, "extensions", "gentle-emote");
+  const local = join(project, ".pi", "extensions", "gentle-emote");
+  for (const dir of [ext, user, local]) mkdirSync(dir, { recursive: true });
+  process.env.PI_CODING_AGENT_DIR = agent;
+  try {
+    writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { enabled: true } }));
+    const global = { externalDisplay: { background: "#303030", backgroundCoverage: 0.75, transparentBackground: true,
+      targets: [{ enabled: true, url: "http://localhost:8001/emote", background: "#202020", transparentBackground: false }] } };
+    const routes = [
+      { enabled: true, url: "http://LOCALHOST:8001/emote", timeoutMs: 321, idleClock: "silence", outline: "#00ff00",
+        background: "gray", backgroundCoverage: 0, transparentBackground: true },
+      { enabled: true, url: "http://matrix/emote", timeoutMs: 250, idleClock: "off", background: "#abcdef", transparentBackground: false },
+    ];
+    const projectConfig = { size: 14, externalDisplay: { timeoutMs: 777, background: "#404040", targets: routes } };
+    writeFileSync(join(user, "config.json"), JSON.stringify(global));
+    writeFileSync(join(local, "config.json"), JSON.stringify(projectConfig));
+    const before = [join(user, "config.json"), join(local, "config.json")].map(path => readFileSync(path, "utf8"));
+    const config = loadLayeredConfig(ext, project).config;
+    assert.deepEqual(config.externalDisplay, {
+      enabled: true, url: "", timeoutMs: 777, background: "#303030", backgroundCoverage: 0.75, transparentBackground: true,
+      targets: [
+        { enabled: true, url: routes[0]!.url, timeoutMs: 321, idleClock: "silence", outline: "#00ff00",
+          background: "#202020", transparentBackground: false },
+        { enabled: true, url: routes[1]!.url, timeoutMs: 250, idleClock: "off" },
+      ],
+    });
+    assert.equal(config.size, 14, "internal terminal configuration remains project-scoped");
+    assert.deepEqual([join(user, "config.json"), join(local, "config.json")].map(path => readFileSync(path, "utf8")), before);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("invalid global PNG appearance stays fail-closed despite a valid project override", () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-global-invalid-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const ext = join(root, "extension"), agent = join(root, "agent"), project = join(root, "project");
+  const user = join(agent, "extensions", "gentle-emote");
+  const local = join(project, ".pi", "extensions", "gentle-emote");
+  for (const dir of [ext, user, local]) mkdirSync(dir, { recursive: true });
+  process.env.PI_CODING_AGENT_DIR = agent;
+  try {
+    writeFileSync(join(ext, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, url: "http://localhost/emote" } }));
+    for (const [key, invalid, valid] of [
+      ["background", "gray", "#000000"], ["background", null, "#000000"],
+      ["backgroundCoverage", 1.1, 1], ["transparentBackground", "true", true],
+    ] as const) {
+      writeFileSync(join(user, "config.json"), JSON.stringify({ externalDisplay: { [key]: invalid } }));
+      writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: { [key]: valid } }));
+      const before = readFileSync(join(user, "config.json"), "utf8");
+      assert.equal(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), null, key);
+      assert.equal(readFileSync(join(user, "config.json"), "utf8"), before, "rejected configuration is not repaired");
+    }
+    writeFileSync(join(local, "config.json"), JSON.stringify({ externalDisplay: null }));
+    assert.equal(normalizeExternalDisplay(loadLayeredConfig(ext, project).config.externalDisplay), null);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     rmSync(root, { recursive: true, force: true });
