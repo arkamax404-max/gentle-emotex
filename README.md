@@ -13,6 +13,8 @@
 
 A pixel-art **Gentleman** that sits in a frame to the left of your prompt and acts out what the agent is doing. Works in [Gentle Shell](https://github.com/Gentleman-Programming/gentle-shell) and [Pi](https://pi.dev).
 
+> **Cross-platform:** compatible with **Windows, macOS and Linux**. **Recommended for use with Herdr**, but Herdr is not required for the avatar or display outputs; panel-focus integration does require it. The companion desktop receiver is a separate, Windows-only utility (see [Related projects](#related-projects)).
+
 He listens to local session events: no model calls or context. Desktop mirroring to `127.0.0.1:8001` is on by default; only avatar images and visual metadata are sent. LAN, USB and D200 stay off until enabled. On top of upstream, this fork adds independent simulator/ESP32 delivery, activity labels, silhouette outlines, ASCII-terminal mirroring, the editable `gentleled` image set, per-destination transparent output and the related projects below.
 
 ## Related projects
