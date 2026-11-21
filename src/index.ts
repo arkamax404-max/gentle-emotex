@@ -116,7 +116,7 @@ const EMOTE_DESCRIPTIONS: Record<string, string> = {
   status: "show the last selected PNG, work phase source and activity snapshot (read-only diagnostic)",
   localOn: "resume delivery to configured localhost simulators",
   localOff: "pause localhost delivery without affecting the ESP32",
-  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003; d200On <port> uses that port for this session only",
+  d200On: "mirror every frame to the Ulanzi D200 key on 127.0.0.1:8003 and relay Herdr panel-focus ACKs when Herdr context exists; d200On <port> uses that port for this session only",
   d200Off: "stop mirroring to the Ulanzi D200 key",
   displayOn: "resume LED/ESP32 delivery and claim the display for this session; displayOn <address> points the group at that board",
   displayOff: "pause LED/ESP32 delivery and release this session's claim",
@@ -649,6 +649,9 @@ export default function (pi: ExtensionAPI) {
         report: (message) => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning"),
         sessionId: sessionId(),
         projectName: typeof cwd === "string" ? basename(cwd) : "",
+        // Opt-in focus: the key receiver shares the session's captured Herdr
+        // controller, so a valid click ACKs like the configured local group.
+        focusRequest: desktopFocusRequest(),
       });
       d200LivePort = port;
       if (projectTitle !== null) d200Display.setTitle(projectTitle);
@@ -1381,7 +1384,7 @@ export default function (pi: ExtensionAPI) {
     // The port is session-local: a fresh session never inherits another one's choice.
     d200Port = null;
     d200LivePort = null;
-    d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName }) : null;
+    d200Display = ownsSharedDisplays && states.d200 ? createD200Display({ fetcher: fetch, report, sessionId: sessionId(), projectName, focusRequest: desktopFocusRequest() }) : null;
     usbDisplay = null;
     usbPort = null;
     stopUsbClock();

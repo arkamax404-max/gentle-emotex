@@ -150,6 +150,61 @@ test("a named D200 mirror renders the captioned layout while an unnamed one keep
   }
 });
 
+test("an opted-in D200 mirror requests focus on the dedicated 204 signal and ACKs success on the next ordinary request, at a non-default port", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const ids: string[] = [];
+  const streams = new Set<string>();
+  const fetcher: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    const stream = new Headers(init?.headers).get("X-Emote-Stream-Id");
+    if (stream !== null && !streams.has(stream)) {
+      streams.add(stream);
+      return new Response(null, { status: 204, headers: { "X-Emote-Focus-Request-Id": `click-${streams.size}` } });
+    }
+    return new Response();
+  };
+  const display = createD200Display({ port: 9100, sessionId: "session-A", fetcher, focusRequest: async id => { ids.push(id); return true; } });
+  try {
+    display.select(image);
+    await flush();
+    assert.equal(calls[0].url, "http://127.0.0.1:9100/emote");
+    assert.deepEqual(ids, ["click-1"], "the receiver's focus signal reached the captured controller");
+    assert.equal(new Headers(calls[0].init.headers).get("X-Emote-Focus-Ack"), null);
+    t.mock.timers.tick(5000);
+    await flush();
+    assert.equal(calls[1].url, "http://127.0.0.1:9100/emote/heartbeat");
+    assert.equal(new Headers(calls[1].init.headers).get("X-Emote-Focus-Ack"), "click-1");
+    assert.deepEqual(ids, ["click-1"], "a confirmed click never re-executes");
+  } finally {
+    display.dispose();
+  }
+});
+
+test("the default callback-less D200 mirror never requests or ACKs focus, even against a signaling receiver", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  let focusCalls = 0;
+  const fetcher: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(null, { status: 204, headers: { "X-Emote-Focus-Request-Id": "click-1" } });
+  };
+  const display = createD200Display({ sessionId: "session-A", fetcher });
+  try {
+    display.select(image);
+    await flush();
+    t.mock.timers.tick(5000);
+    await flush();
+    display.select({ ...image, frame: "next.png" });
+    await flush();
+    assert.equal(focusCalls, 0, "no callback is captured by the default factory");
+    assert.ok(calls.some(call => call.url.endsWith("/heartbeat")), "the signaling receiver got ordinary delivery");
+    assert.ok(calls.every(call => new Headers(call.init.headers).get("X-Emote-Focus-Ack") === null));
+  } finally {
+    display.dispose();
+  }
+});
+
 test("disposing the D200 display stops delivery", async () => {
   const { calls, fetcher } = recorder();
   const display = createD200Display({ fetcher });

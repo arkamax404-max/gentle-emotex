@@ -10,6 +10,8 @@ import { prepareDisplayImage } from "../src/display_image.ts";
 import { useSerialSystemDeps, type SerialPortLike } from "../src/serial_display.ts";
 import { SERIAL_ENTER, SERIAL_ENTER_ACK, SERIAL_EXIT, SERIAL_EXIT_ACK, MAX_PNG_BYTES } from "../src/serial_protocol.ts";
 import { crc32 } from "node:zlib";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { installNetworkGuard } from "./helpers/network.ts";
 
 import { boot, PLACEHOLDER, SESSION_ID, SUBAGENT_CHANNEL } from "./helpers/boot.ts";
@@ -2349,6 +2351,78 @@ test("a YOLO rest pose hands the receiver clock the panel after five settled min
   } finally {
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     t.mock.restoreAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("d200On wires Herdr focus only with valid context: one execution, ACK on the next frame, inert without Herdr", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-d200-focus-"));
+  const profile = join(root, "profile");
+  const configDir = join(profile, "extensions", "gentle-emote");
+  mkdirSync(configDir, { recursive: true });
+  // Isolate the D200 mirror: no configured desktop receiver competes for focus.
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ enabled: true, externalDisplay: { enabled: false } }));
+  const herdrEnv = { HERDR_ENV: "1", HERDR_BIN_PATH: "/test/herdr", HERDR_SOCKET_PATH: "/test/socket", HERDR_PANE_ID: "pane-A" };
+  const confirmed = JSON.stringify({ result: { type: "agent_info", agent: { pane_id: "pane-A", focused: true } } });
+  const oldFetch = globalThis.fetch;
+  const savedEnv = Object.entries(herdrEnv).map(([key]) => [key, process.env[key]] as const);
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const streams = new Set<string>();
+  globalThis.fetch = (async (url, init) => {
+    calls.push({ url: String(url), init });
+    const stream = new Headers(init?.headers).get("X-Emote-Stream-Id");
+    if (stream !== null && !streams.has(stream)) {
+      streams.add(stream);
+      return new Response(null, { status: 204, headers: { "X-Emote-Focus-Request-Id": `click-${streams.size}` } });
+    }
+    return new Response();
+  }) as typeof fetch;
+  const executions: Array<{ args: string[]; done: (error: Error | null, stdout: string, stderr: string) => void }> = [];
+  t.mock.method(childProcess, "execFile", (_file: string, args: string[], _options: unknown, done: (error: Error | null, stdout: string, stderr: string) => void) => {
+    const execution = { args, done }; executions.push(execution);
+    return { kill: () => true };
+  });
+  syncBuiltinESMExports();
+  const d200Acks = () => calls.filter(call => call.url.includes(":8003/")).map(call => new Headers(call.init!.headers).get("X-Emote-Focus-Ack"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    // Valid context: the explicit d200On sender requests focus and ACKs the confirmed click.
+    Object.assign(process.env, herdrEnv);
+    lab = await boot(root, [], profile);
+    const emote = lab.commands.get("emote");
+    await emote.handler("d200On", lab.ctx);
+    await lab.emit("tool_execution_start", { toolName: "bash" });
+    await flush();
+    assert.ok(calls.some(call => call.url === "http://127.0.0.1:8003/emote"), "d200On mirrors frames");
+    assert.equal(executions.length, 1, "the wired sender launched exactly one focus process");
+    assert.deepEqual(executions[0]!.args, ["agent", "focus", "pane-A"]);
+    executions[0]!.done(null, confirmed, ""); await flush();
+    await lab.emit("tool_execution_start", { toolName: "read" });
+    await flush();
+    const validAcks = d200Acks();
+    assert.equal(validAcks.at(-1), "click-1", "ACK rides an ordinary D200 frame after confirmation");
+    assert.ok(validAcks.slice(0, -1).every(value => value === null), "no ACK precedes the confirmed focus");
+    await lab.shutdown();
+    lab = undefined;
+
+    // Invalid context: the same wiring stays completely inert.
+    calls.length = 0;
+    for (const [key] of savedEnv) delete process.env[key];
+    lab = await boot(root, [], profile);
+    const emote2 = lab.commands.get("emote");
+    await emote2.handler("d200On", lab.ctx);
+    await lab.emit("tool_execution_start", { toolName: "bash" });
+    await flush();
+    await lab.emit("tool_execution_start", { toolName: "read" });
+    await flush();
+    assert.ok(calls.some(call => call.url === "http://127.0.0.1:8003/emote"), "the mirror still delivers ordinary frames");
+    assert.equal(executions.length, 1, "missing Herdr context never launches a focus process");
+    assert.ok(d200Acks().every(value => value === null), "no ACK is ever emitted without the controller");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = oldFetch;
+    savedEnv.forEach(([key, value]) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+    t.mock.restoreAll(); syncBuiltinESMExports();
     rmSync(root, { recursive: true, force: true });
   }
 });
