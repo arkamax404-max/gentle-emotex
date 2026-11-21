@@ -247,12 +247,19 @@ export default function (pi: ExtensionAPI) {
   }
 
   const displayActivity = new DisplayActivityTracker(activity => {
+    // Known subagent activity (native count or, before the bus speaks, observed
+    // tool calls) drives two display-only behaviors: no grandma or running age
+    // for the resting parent, and no invented child phase anywhere.
+    knownSubagentCount = activity.activeSubagents;
+    animator.setSubagentActive(knownSubagentCount > 0);
+    if (knownSubagentCount > 0 && animator.currentState === "grandma") animator.transitionTo("idle");
     externalDisplay?.updateActivity(activity);
     d200Display?.updateActivity(activity);
     if (usbIdleClock !== null && usbClockMode !== "off") {
       usbIdleClock.update(activity, performance.now(), lastFrameImage?.state);
       refreshUsbClock(true);
     }
+    applySubagentScene();
   });
   /** Native subagent task lifecycle (Gentle Shell bus); null falls back to the call-based count. */
   const subagentTasks = new SubagentTaskTracker(count => {
@@ -283,6 +290,16 @@ export default function (pi: ExtensionAPI) {
   let latestThinking = "";
   /** Per-project display title override; null shows the project folder basename. */
   let projectTitle: string | null = null;
+  // Dedicated subagent scene (display-only): the resting parent swaps to a
+  // configurable child avatar while exactly one known subagent runs.
+  let knownSubagentCount = 0;
+  let sceneSuppressed = false;
+  let subagentSceneOn = false;
+  /** Frames currently loaded by the scene; null when the parent's own are loaded. */
+  let subagentSceneSet: string | null = null;
+  let applyingScene = false;
+  let subagentAvatarWarned = false;
+  let uiNotify: ((message: string, level?: string) => void) | null = null;
 
   /** Apply the saved override on top of destinations built with the folder basename. */
   function applyProjectTitle(): void {
@@ -309,6 +326,88 @@ export default function (pi: ExtensionAPI) {
   let lastSelected: { state: string; frame: string; set: string } | null = null;
 
   const animator = new Animator(config, renderer);
+  animator.setStateListener(() => applySubagentScene());
+
+  // --- Dedicated subagent avatar (a display scene, never a logical phase) ---
+
+  /** The set the parent's own visuals belong to; the scene always restores it. */
+  function primarySetName(): string {
+    return manualAvatar ?? resolveEmoteSet(latestModel, latestThinking, config.emotes);
+  }
+
+  /** First shipped default distinct from the parent's own selection. */
+  function defaultSubagentSet(primary: string): string | null {
+    for (const fallback of ["gentleled", "gentleman"] as const) {
+      if (fallback === primary) continue;
+      if (findAvatar(fallback, extDir, cwd)) return fallback;
+    }
+    return null;
+  }
+
+  /**
+   * The bounded child avatar: the configured name through the existing manual
+   * selection guards, otherwise the default alternate (gentleled, or gentleman
+   * when the parent rests on gentleled). A missing or unusable configured name
+   * falls back safely, warns once and rewrites no preference anywhere.
+   */
+  function resolveSubagentSet(): string | null {
+    const configured = typeof config.subagentAvatar === "string" && config.subagentAvatar.trim() !== "" ? config.subagentAvatar : null;
+    const primary = primarySetName();
+    if (configured !== null) {
+      if (configured === primary) {
+        const alternate = defaultSubagentSet(primary);
+        if (!subagentAvatarWarned && alternate !== null) {
+          subagentAvatarWarned = true;
+          uiNotify?.(`configured subagentAvatar "${configured}" is the current avatar; using "${alternate}"`, "warning");
+        }
+        return alternate;
+      }
+      if (findAvatar(configured, extDir, cwd)) return configured;
+      if (!subagentAvatarWarned) {
+        subagentAvatarWarned = true;
+        uiNotify?.(`configured subagentAvatar "${configured}" is unavailable; using the shipped default`, "warning");
+      }
+    }
+    return defaultSubagentSet(primary);
+  }
+
+  /**
+    * Applies the display-only child scene. It exists only while the parent's
+    * own visual is the resting idle (never under a prompt or the goodbye),
+    * exactly one subagent is known to run, and a bounded child avatar exists.
+    * Everything else — busy work, prompts, failures, compaction, talk, several
+    * children — keeps the primary avatar and its own visuals; the child's real
+    * phase is never invented or displayed.
+    */
+  function applySubagentScene(): void {
+    if (applyingScene || !widgetActive) return;
+    const want = !sceneSuppressed && !farewell && knownSubagentCount === 1
+      && animator.currentState === "idle" && !animator.promptOpen;
+    if (want) {
+      const set = resolveSubagentSet();
+      if (set === null) {
+        subagentSceneOn = false;
+        subagentSceneSet = null;
+        return;
+      }
+      if (subagentSceneOn && subagentSceneSet === set) return;
+      subagentSceneOn = true;
+      subagentSceneSet = set;
+      applyingScene = true;
+      loadEmoteSet(set, true);
+      refreshCurrentFrame();
+      applyingScene = false;
+      return;
+    }
+    if (subagentSceneOn) {
+      subagentSceneOn = false;
+      subagentSceneSet = null;
+      applyingScene = true;
+      loadEmoteSet(primarySetName());
+      refreshCurrentFrame();
+      applyingScene = false;
+    }
+  }
 
   /**
    * Every configured destination; paused targets retain the latest frame.
@@ -673,10 +772,16 @@ export default function (pi: ExtensionAPI) {
     ctx.ui?.notify?.(`[${EXTENSION_NAME}] D200 mirroring off`, "info");
   }
 
-  function loadEmoteSet(setName: string) {
+  function loadEmoteSet(setName: string, scene = false) {
     // Explicit choices never use the legacy resolver's silent Gentleman fallback.
-    const baseDir = manualAvatar !== null ? findAvatar(setName, extDir, cwd) : findEmoteSetDir(setName, extDir, cwd);
+    // A scene avatar is always looked up like a manual selection, but it never
+    // becomes the selection: currentEmoteSet and the panel keep the parent's own.
+    const baseDir = manualAvatar !== null || scene ? findAvatar(setName, extDir, cwd) : findEmoteSetDir(setName, extDir, cwd);
     if (!baseDir) return;
+    if (!scene) {
+      currentEmoteSet = setName;
+      subagentSceneSet = null;
+    }
     // Automatic twins may be partial; manual twins still require usable idle content.
     // Both use the same path guards and first-existing-layer ownership.
     const safeTwin = yoloOn ? findAvatar(`${setName}-yolo`, extDir, cwd,
@@ -735,6 +840,7 @@ export default function (pi: ExtensionAPI) {
     log(`accent: changed to rgb(${next.join(",")})`);
     loadEmoteSet(currentEmoteSet);
     refreshCurrentFrame();
+    applySubagentScene();
   }
 
   function watchBanner() {
@@ -798,6 +904,7 @@ export default function (pi: ExtensionAPI) {
       animator.setIdleVariant(variant);
       loadEmoteSet(currentEmoteSet);
       refreshCurrentFrame();
+      applySubagentScene();
     } catch { /* display only */ }
   }
 
@@ -1010,17 +1117,20 @@ export default function (pi: ExtensionAPI) {
       config.size = value as number;
       animator.updateConfig(config);
       refreshCurrentFrame();
+      applySubagentScene();
       return;
     }
     if (key === "placement") {
       config.placement = value as Config["placement"];
       installWidget(ctx);
       refreshCurrentFrame();
+      applySubagentScene();
       return;
     }
     if (key === "frame") {
       config.frame = value as boolean;
       refreshCurrentFrame();
+      applySubagentScene();
       return;
     }
     // A new accent re-tints the frames themselves, so the set is reloaded from disk.
@@ -1028,6 +1138,7 @@ export default function (pi: ExtensionAPI) {
     accent = resolveAccent(config.accent);
     loadEmoteSet(currentEmoteSet);
     refreshCurrentFrame();
+    applySubagentScene();
   }
 
   /** Apply one panel item through the command entry point, so behavior never forks. */
@@ -1166,6 +1277,7 @@ export default function (pi: ExtensionAPI) {
         manualAvatar = next;
         loadEmoteSet(next ?? resolveEmoteSet(latestModel, latestThinking, config.emotes));
         refreshCurrentFrame();
+        applySubagentScene();
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] avatar: ${next ?? "auto"}`, "info");
         return;
       }
@@ -1197,6 +1309,7 @@ export default function (pi: ExtensionAPI) {
         // Reload the layers so the persisted address is what the new sender uses,
         // then rebuild it: destinations are immutable per session.
         ({ config } = loadLayeredConfig(extDir, cwd));
+        subagentAvatarWarned = false;
         const report = (message: string) => ctx.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning");
         externalDisplay?.dispose();
         // The named board must win even when a project layer still configures the
@@ -1212,6 +1325,7 @@ export default function (pi: ExtensionAPI) {
         // current selection is pushed through the existing animation pipeline.
         externalDisplay?.claimDisplays();
         refreshCurrentFrame();
+        applySubagentScene();
         const kept = saved.loopbackPreserved > 0 ? `; ${saved.loopbackPreserved} loopback target preserved` : "";
         ctx.ui?.notify?.(`[${EXTENSION_NAME}] LED/ESP32 display: ${parsed.url}${kept}`, "info");
         return;
@@ -1288,6 +1402,7 @@ export default function (pi: ExtensionAPI) {
         loadEmoteSet(currentEmoteSet);
         installWidget(ctx);
         refreshCurrentFrame();
+        applySubagentScene();
         return;
       }
       if (name === "status") {
@@ -1366,6 +1481,7 @@ export default function (pi: ExtensionAPI) {
 
     herdrFocus = createHerdrFocusController({ env: process.env, log });
     const report = (message: string) => ctx.ui.notify(`[${EXTENSION_NAME}] ${message}`, "warning");
+    uiNotify = (message, level = "warning") => ctx.ui.notify(`[${EXTENSION_NAME}] ${message}`, level);
     // The saved per-project override wins over the folder basename; a malformed
     // file warns and falls back to the folder name, preserving the file.
     projectTitle = typeof cwd === "string" ? new TitleStore(cwd).load(report) : null;
@@ -1393,6 +1509,11 @@ export default function (pi: ExtensionAPI) {
     refreshContextUsage(ctx);
     displayActivity.reset();
     directWorkPhase = null;
+    knownSubagentCount = 0;
+    sceneSuppressed = false;
+    subagentSceneOn = false;
+    subagentSceneSet = null;
+    subagentAvatarWarned = false;
     attachWorkPhase();
     attachSubagentTasks();
     lastResolved = resolveRenderer(config.terminals, userConfiguredTerminals);
@@ -1469,6 +1590,11 @@ export default function (pi: ExtensionAPI) {
     workPhase.dispose();
     subagentTasks.dispose();
     directWorkPhase = null;
+    knownSubagentCount = 0;
+    sceneSuppressed = false;
+    subagentSceneOn = false;
+    subagentSceneSet = null;
+    uiNotify = null;
   });
 
   pi.on("model_select", async (event, ctx) => {
@@ -1498,6 +1624,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", async (_event, ctx) => {
     refreshContextUsage(ctx);
+    // The turn is about to own the avatar; the child scene must not flash while
+    // the turn interrupts it and the finale is still being chosen.
+    sceneSuppressed = true;
     cancelGreeting();
     // The tracker reset drops any stale detail from the previous turn; the
     // handshake recovers the host's current phase (order-safe: a host event
@@ -1601,9 +1730,11 @@ export default function (pi: ExtensionAPI) {
     if (!widgetActive) return;
     refreshContextUsage(ctx);
     directWorkPhase = null;
+    sceneSuppressed = true;
     displayActivity.reset();
     if (runHadError) displayActivity.set("error", "idle");
     if (farewell) {
+      sceneSuppressed = false;
       endFarewellLater();
       return;
     }
@@ -1614,6 +1745,9 @@ export default function (pi: ExtensionAPI) {
     } else if (animator.currentState !== "idle" && animator.currentState !== "hi" && animator.currentState !== "failure") {
       animator.transitionTo(finale);
     }
+    // The finale settled (or already rested): the child scene may take over.
+    sceneSuppressed = false;
+    applySubagentScene();
   });
 
   pi.on("session_before_compact", async () => {

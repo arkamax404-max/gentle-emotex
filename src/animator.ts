@@ -48,6 +48,8 @@ export class Animator {
   private workPhase: WorkPhase | null = null;
   private promptDepth = 0;
   private deferredFailure: { state: EmoteState; file: string } | null = null;
+  private stateListener: ((state: EmoteState) => void) | null = null;
+  private subagentActive = false;
 
   // Talk state
   private talkWordCount = 0;
@@ -70,6 +72,34 @@ export class Animator {
 
   setTui(tui: TUI | null) {
     this.renderer.setTui(tui);
+  }
+
+  /**
+   * Owner hook fired after every logical transition, so scene switches can
+   * track when the parent starts or stops resting without polling.
+   */
+  setStateListener(listener: ((state: EmoteState) => void) | null) {
+    this.stateListener = listener;
+  }
+
+  /** A blocking prompt owns the picture without changing the logical state. */
+  get promptOpen(): boolean {
+    return this.promptDepth > 0;
+  }
+
+  /**
+   * Known subagent activity suppresses the grandma for as long as it lasts:
+   * the resting parent with workers is not real rest. Ending the activity
+   * restarts the timeout from that moment, as any idle re-entry would.
+   */
+  setSubagentActive(active: boolean) {
+    if (active === this.subagentActive) return;
+    this.subagentActive = active;
+    if (active) {
+      if (this.grandmaTimer) { clearTimeout(this.grandmaTimer); this.grandmaTimer = null; }
+      return;
+    }
+    if (!this.stopped && this.currentState === "idle") this.scheduleGrandma();
   }
 
   setEmotesConfig(emotesConfig: EmotesConfig) {
@@ -211,6 +241,7 @@ export class Animator {
       case "grandma": this.enterSequence(state); break;
       case "bye": this.enterSequence(state); break;
     }
+    this.stateListener?.(state);
   }
 
   /** Session greeting: flies in with the propeller, then waves. */
@@ -270,7 +301,7 @@ export class Animator {
 
   private scheduleGrandma() {
     if (this.grandmaTimer) { clearTimeout(this.grandmaTimer); this.grandmaTimer = null; }
-    if (this.stopped || this.config.grandmaAfterMs <= 0 || this.renderer.getFrameFiles("grandma").length === 0) return;
+    if (this.stopped || this.subagentActive || this.config.grandmaAfterMs <= 0 || this.renderer.getFrameFiles("grandma").length === 0) return;
     this.grandmaTimer = setTimeout(() => {
       this.grandmaTimer = null;
       if (this.currentState === "idle") this.transitionTo("grandma");

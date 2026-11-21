@@ -54,6 +54,8 @@ export interface Config {
   cycleMs: number;
   /** Idle time before the avatar turns into a grandma. 0 disables it. */
   grandmaAfterMs: number;
+  /** Optional dedicated avatar for the resting parent while exactly one known subagent runs. */
+  subagentAvatar?: string;
   accent: AccentSetting;
   /** Case-insensitive regex; a matching user prompt plays the goodbye animation. */
   farewellPattern: string;
