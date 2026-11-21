@@ -176,6 +176,7 @@ test("busy/error during work, active subagents, detailed work and explicit previ
     { activity: busy }, { activity: { ...idle, phase: "waiting" as const } },
     { activity: { ...idle, activeSubagents: 1 } }, { activity: { ...idle, workPhase: "planning" as const } },
     { activity: idle, state: "bye" },
+    { activity: busy, state: "yolo" }, { activity: { ...idle, activeSubagents: 1 }, state: "super-yolo" },
   ]) {
     const calls: RequestInit[] = [];
     const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
@@ -199,6 +200,40 @@ test("idle to grandma preserves continuous idle budget and grandma remains untim
     await advance(100000); assert.equal(calls.length, 2);
     await advance(1000); assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock");
     assert.strictEqual(calls[1]!.body, calls[2]!.body);
+  } finally { sender.dispose(); }
+});
+
+test("a YOLO or Super YOLO rest pose hands the receiver clock the panel after five minutes", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  for (const variant of ["yolo", "super-yolo"]) {
+    calls.length = 0;
+    const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+    try {
+      sender.updateActivity(idle);
+      sender.select(frame(`${variant}.png`, variant)); await flush();
+      assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), variant, "the rest pose is the delivered selection");
+      await advance(300000);
+      assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), `${variant} is still the rest pose at the strict deadline`);
+      await advance(1000);
+      assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", `${variant} hands the panel to the receiver clock`);
+      assert.equal(headers(calls.at(-1)!).get("X-Emote-Frame"), "clock.png");
+      assert.equal(headers(calls.at(-1)!).get("X-Emote-Set"), "idle-clock");
+    } finally { sender.dispose(); }
+  }
+});
+
+test("a YOLO rest keeps the continuous idle budget earned by earlier ordinary idle", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+  try {
+    sender.updateActivity(idle); sender.select(frame()); await flush();
+    await advance(200000);
+    sender.select(frame("yolo.png", "yolo")); await flush();
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "yolo");
+    await advance(100000);
+    assert.ok(calls.every(call => headers(call).get("X-Emote-State") !== "clock"), "still the rest pose at the strict deadline: budget continuity held");
+    await advance(1000);
+    assert.equal(headers(calls.at(-1)!).get("X-Emote-State"), "clock", "the deadline never restarts at the variant switch");
   } finally { sender.dispose(); }
 });
 
@@ -264,6 +299,22 @@ test("idleClock strictly validates modes and invalid targets consume no requests
     try { assert.equal(sender.enabled, false); sender.select(frame()); await flush(); assert.equal(calls.length, 0); assert.deepEqual(warnings, ["externalDisplay: invalid configuration; disabled"]); }
     finally { sender.dispose(); }
   }
+});
+
+test("yolo and super-yolo rest poses settle like idle on the shared clock", () => {
+  for (const state of ["idle", "yolo", "super-yolo"]) {
+    const clock = new IdleClock(0);
+    clock.update(idle, 0, state);
+    assert.equal(clock.remaining(299999), 1, `${state} keeps running the settled deadline`);
+    assert.equal(clock.isActive(300000), false, `${state} is still ordinary exactly at five minutes`);
+    assert.equal(clock.isActive(300001), true, `${state} is settled idle past the deadline`);
+  }
+});
+
+test("busy YOLO rest never settles: running work owns the display", () => {
+  const clock = new IdleClock(0);
+  clock.update(busy, 0, "yolo");
+  assert.equal(clock.remaining(400000), null, "a busy YOLO rest is not settled at all");
 });
 
 test("remaining() reports the settled deadline without mutating eligibility", () => {

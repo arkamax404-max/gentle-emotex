@@ -13,14 +13,17 @@ export class IdleClock {
    * A settled session is the idle activity or the post-error idle the host
    * reports at agent_end after a failed tool: the display already labels that
    * combination IDLE (red), so it must not block the clock for the rest of the
-   * session. Running work, any non-idle phase, a published work phase and a
-   * non-idle preview keep owning the display.
+   * session. The YOLO and Super YOLO rest poses are the idle picture while
+   * that permission mode is on, so they settle like idle too. Running work,
+   * any non-idle phase, a published work phase and a non-idle preview keep
+   * owning the display.
    */
   update(activity: DisplayActivity, now: number, state?: string): void {
     const settled = activity.phase === "idle" && activity.activeSubagents === 0
       && (activity.status === "idle" || activity.status === "error");
-    const eligible = settled && activity.workPhase === undefined
-      && (state === undefined || state === "idle" || state === "grandma");
+    const resting = state === undefined || state === "idle" || state === "grandma"
+      || state === "yolo" || state === "super-yolo";
+    const eligible = settled && activity.workPhase === undefined && resting;
     if (!eligible) this.idleSince = null;
     else if (this.idleSince === null) this.idleSince = now;
   }

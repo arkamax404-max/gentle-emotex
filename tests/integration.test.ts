@@ -10,104 +10,11 @@ import { prepareDisplayImage } from "../src/display_image.ts";
 import { useSerialSystemDeps, type SerialPortLike } from "../src/serial_display.ts";
 import { SERIAL_ENTER, SERIAL_ENTER_ACK, SERIAL_EXIT, SERIAL_EXIT_ACK, MAX_PNG_BYTES } from "../src/serial_protocol.ts";
 import { crc32 } from "node:zlib";
+import { installNetworkGuard } from "./helpers/network.ts";
 
-const PLACEHOLDER = "\u{10EEEE}";
-const SESSION_ID = "integration-session";
-/** Gentle Shell's native notification channel, where subagent task transitions are published. */
-const SUBAGENT_CHANNEL = "gentle-pi:notification:source";
+import { boot, PLACEHOLDER, SESSION_ID, SUBAGENT_CHANNEL } from "./helpers/boot.ts";
 
-/** Loads the extension against a fake Pi and a real pi-tui component tree (Ghostty, no multiplexer). */
-export async function boot(cwd = "/tmp", outputs = ["internalOn", "localOn", "displayOn"], profile?: string, childSession = false) {
-  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const agentRoot = profile ?? mkdtempSync(join(tmpdir(), "emote-profile-"));
-  for (const key of ["TMUX", "ZELLIJ", "ZELLIJ_SESSION_NAME", "KITTY_WINDOW_ID", "TERM_PROGRAM", "GENTLE_PI_AGENTS_CHILD"]) delete process.env[key];
-  if (childSession) process.env.GENTLE_PI_AGENTS_CHILD = "1";
-  process.env.GHOSTTY_RESOURCES_DIR = "/usr/share/ghostty";
-  process.env.PI_CODING_AGENT_DIR = agentRoot;
-
-  const notices: Array<{ message: string; level: string }> = [];
-  const writes: string[] = [];
-  const realWrite = process.stdout.write.bind(process.stdout);
-  (process.stdout as any).write = (chunk: string | Uint8Array, ...args: any[]) => {
-    // Node's test runner writes binary protocol messages here too; never swallow them.
-    if (typeof chunk !== "string") return (realWrite as any)(chunk, ...args);
-    writes.push(chunk);
-    return true;
-  };
-
-  // The usb output must never read or open this machine's real serial ports.
-  useSerialSystemDeps({ list: async () => [], open: async () => { throw new Error("no serial port in tests"); } });
-  const handlers = new Map<string, Function[]>();
-  const commands = new Map<string, any>();
-  // A working pi.events bus so bus contracts (YOLO host UI, ODD work phase) can be exercised.
-  const busHandlers = new Map<string, Function[]>();
-  const busSent: Array<{ channel: string; payload: any }> = [];
-  const events = {
-    emit: (channel: string, payload: unknown) => {
-      busSent.push({ channel, payload });
-      for (const handler of [...(busHandlers.get(channel) ?? [])]) handler(payload);
-    },
-    on: (channel: string, handler: Function) => {
-      busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
-      return () => busHandlers.set(channel, (busHandlers.get(channel) ?? []).filter(existing => existing !== handler));
-    },
-  };
-  const pi = {
-    on: (event: string, handler: Function) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-    registerCommand: (name: string, options: any) => commands.set(name, options),
-    getThinkingLevel: () => "high",
-    events,
-  };
-  const emitBus = (channel: string, payload: unknown) => {
-    for (const handler of [...(busHandlers.get(channel) ?? [])]) handler(payload);
-  };
-  const emit = async (event: string, payload: any = {}) => {
-    for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
-  };
-
-  // ctx.ui.custom() support: the panel factory is captured so tests can drive it.
-  const customCalls: Array<{ factory: any; options: any }> = [];
-  let panelResolve: ((value: unknown) => void) | null = null;
-  const widgets = new Container();
-  const editor = new Container();
-  // Same shape as Gentle Shell's float prompt: hint row, input row, blank panel row.
-  editor.addChild({ render: (width: number) => [`┃ waiting for input`.padEnd(width), `┃ > `.padEnd(width), `┃`.padEnd(width)] } as any);
-  const tui = { children: [widgets, editor], requestRender() {}, getFocusedComponent: () => null };
-  const ctx = {
-    hasUI: true,
-    cwd,
-    model: { id: "claude-test" },
-    sessionManager: { getSessionId: () => SESSION_ID },
-    ui: {
-      notify(message: string, level: string) { notices.push({ message, level }); },
-      onTerminalInput: () => () => {},
-      custom: (factory: any, options: any) => {
-        customCalls.push({ factory, options });
-        return new Promise(resolve => { panelResolve = resolve as (value: unknown) => void; });
-      },
-      setWidget: (_key: string, factory: any) => { widgets.clear(); if (factory) widgets.addChild(factory(tui, {})); },
-    },
-  };
-
-  const { default: extension } = await import("../src/index.ts");
-  extension(pi as any);
-  await emit("session_start");
-  for (const output of outputs) await commands.get("emote").handler(output, ctx);
-  const shutdown = async () => {
-    if (shutDown) return;
-    shutDown = true;
-    await emit("session_shutdown", { reason: "quit" });
-  };
-  let shutDown = false;
-  const panelDone = (value: unknown) => panelResolve?.(value);
-  return { emit, emitBus, busSent, busHandlers, widgets, editor, writes, notices, shutdown, commands, ctx, customCalls, panelDone, restore: () => {
-    useSerialSystemDeps(null);
-    (process.stdout as any).write = realWrite;
-    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-    if (!profile) rmSync(agentRoot, { recursive: true, force: true });
-  } };
-}
+export { boot } from "./helpers/boot.ts";
 
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -2185,6 +2092,69 @@ test("usbOff clears the clock truth and a restarted link starts its five minutes
   } finally {
     await lab?.shutdown();
     lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a boot without a test-owned fetch mock records every delivery in the session guard instead of the network", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-boot-guard-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    // No global fetch mock: the harness guard itself must own the network.
+    lab = await boot(root);
+    await lab.emit("tool_execution_start", { toolName: "bash" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(lab.network.requests.length > 0, "the harness guard captures the outgoing frames");
+    for (const request of lab.network.requests) {
+      assert.equal(new URL(request.url).host, "127.0.0.1:8001", `only the shipped loopback destination is reached, not ${request.url}`);
+    }
+  } finally {
+    await lab?.shutdown(); lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a YOLO rest pose hands the receiver clock the panel after five settled minutes", async t => {
+  let elapsed = 1_000;
+  t.mock.method(performance, "now", () => elapsed);
+  const root = mkdtempSync(join(tmpdir(), "emote-yolo-clock-"));
+  const dir = join(root, ".pi", "extensions", "gentle-emote");
+  const png = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) });
+  for (const [set, state] of [["custom", "idle"], ["custom-yolo", "yolo"]] as const) {
+    const stateDir = join(dir, "emotes", set, state);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, `${state}.png`), png);
+  }
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    emotes: [{ model: "*", "emote-set": "custom" }],
+    externalDisplay: { enabled: true, url: "http://127.0.0.1:8000/emote", idleClock: "receiver" },
+  }));
+  const originalFetch = globalThis.fetch;
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_url, init) => { calls.push(init!); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(root, ["localOn"]);
+    lab.busSent.find(x => x.channel === "gentle:yolo:host-ui")!.payload.respond({
+      read: async () => "ON",
+      readMode: async () => "yolo",
+      observe: () => () => {},
+    });
+    await flush();
+    await flush();
+    assert.ok(calls.some(call => new Headers(call.headers).get("X-Emote-State") === "yolo"),
+      "the YOLO rest pose is the delivered idle selection");
+    elapsed = 1_000 + 300_001;
+    await lab.emit("agent_end");
+    await flush();
+    const carrier = calls.find(call => new Headers(call.headers).get("X-Emote-State") === "clock");
+    assert.ok(carrier, "the receiver clock takes over from the YOLO rest after five minutes");
+    assert.equal(new Headers(carrier!.headers).get("X-Emote-Frame"), "clock.png");
+    assert.equal(new Headers(carrier!.headers).get("X-Emote-Set"), "idle-clock");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
+    t.mock.restoreAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
