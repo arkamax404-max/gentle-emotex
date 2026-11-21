@@ -539,9 +539,10 @@ test("internalOff removes the terminal avatar but preserves PNG POSTs and intern
     assert.equal(lab.writes.length, writes, "no terminal graphics are transmitted while hidden");
     assert.deepEqual(command.getArgumentCompletions("local").map((item: any) => item.value), ["localOn", "localOff"]);
     assert.ok(command.getArgumentCompletions("local").every((item: any) => item.description));
-    assert.deepEqual(command.getArgumentCompletions("debug"), []);
+    assert.deepEqual(command.getArgumentCompletions("debug").map((item: any) => item.value), ["debugOn", "debugOff"]);
+    assert.ok(command.getArgumentCompletions("debug").every((item: any) => item.description));
     assert.ok(command.description.includes("localOn | localOff"));
-    assert.ok(!command.description.includes("debugOn"));
+    assert.ok(command.description.includes("debugOn"), "the diagnostic commands are documented apart from the local output");
     const localBefore = calls.filter(call => call.url.includes("localhost")).length;
     const deviceBefore = calls.filter(call => call.url.includes("matrix")).length;
     await command.handler("localOff", lab.ctx);
@@ -709,17 +710,22 @@ test("local defaults on; independent global switches survive project changes and
     for (const output of ["internalOff", "localOff", "d200Off", "displayOff"]) await lab.commands.get("emote").handler(output, lab.ctx);
     const store = new OutputStateStore(profile);
     const saved = store.load(() => {});
-    for (const obsolete of ["debugOn", "debugOff"]) {
+    const command = lab.commands.get("emote");
+    // The diagnostic commands are recognized again, but they are session-local
+    // toggles: they change no saved output, send no frame and never fall through
+    // to the unknown-command help. Off is the default state of every session.
+    for (const diagnostic of ["debugOff", "debugOn"]) {
       const count = calls.length;
-      const command = lab.commands.get("emote");
-      await command.handler(obsolete, lab.ctx); await flush();
-      assert.deepEqual(store.load(() => {}), saved, "obsolete command cannot change saved outputs");
-      assert.equal(calls.length, count, "obsolete command cannot send a frame");
+      await command.handler(diagnostic, lab.ctx); await flush();
+      assert.deepEqual(store.load(() => {}), saved, "a diagnostic command cannot change saved outputs");
+      assert.equal(calls.length, count, "a diagnostic command cannot send a frame");
       assert.deepEqual(lab.notices.at(-1), {
-        message: `[gentle-emote] /emote <state>: ${command.getArgumentCompletions("").map((item: any) => item.value).join(", ")}`,
+        message: `[gentle-emote] unsupported-frame warnings ${diagnostic === "debugOn" ? "on" : "off"} (session-local)`,
         level: "info",
       });
     }
+    await command.handler("debugOff", lab.ctx); await flush();
+    assert.equal(new OutputStateStore(profile).load(() => {}).debug, false, "the diagnostic shares no preference key with the local output");
     await lab.shutdown(); lab.restore(); lab = undefined;
     calls.length = 0;
     lab = await boot(join(root, "a"), [], profile);
@@ -2423,6 +2429,86 @@ test("d200On wires Herdr focus only with valid context: one execution, ACK on th
     await lab?.shutdown(); lab?.restore(); globalThis.fetch = oldFetch;
     savedEnv.forEach(([key, value]) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; });
     t.mock.restoreAll(); syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("debugOn/debugOff: session-local diagnostic for the unsupported-frame warning, default off", async () => {
+  const root = mkdtempSync(join(tmpdir(), "emote-frame-warnings-"));
+  const profile = join(root, "profile");
+  const dir = join(root, "project", ".pi", "extensions", "gentle-emote");
+  mkdirSync(join(dir, "emotes", "warny", "idle"), { recursive: true });
+  mkdirSync(join(dir, "emotes", "warny", "tool"), { recursive: true });
+  mkdirSync(join(dir, "emotes", "warny", "write"), { recursive: true });
+  const png = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) });
+  writeFileSync(join(dir, "emotes", "warny", "idle", "o k.png"), png); // unsupported identifier
+  writeFileSync(join(dir, "emotes", "warny", "tool", "y o.png"), png); // unsupported identifier
+  writeFileSync(join(dir, "emotes", "warny", "write", "w.png"), png); // valid frame for state changes
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ externalDisplay: { enabled: true, targets: [
+    { enabled: true, url: "http://localhost:8000/emote" },
+    { enabled: true, url: "http://matrix/emote" },
+  ] } }));
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(); };
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    lab = await boot(join(root, "project"), ["internalOn", "localOn", "displayOn"], profile);
+    const emote = lab.commands.get("emote");
+    // Consecutive same-state tool events do not reselect frames: alternate
+    // write/bash so every bash transition selects the unsupported frame again.
+    const bash = async () => { await lab!.emit("tool_execution_start", { toolName: "bash" }); await flush(); };
+    const cycle = async () => { await lab!.emit("tool_execution_start", { toolName: "write" }); await flush(); await bash(); };
+    await lab.emit("tool_execution_start", { toolName: "write" }); await flush();
+    const warnings = () => lab.notices.filter(n => n.level === "warning" && n.message.includes("externalDisplay: unsupported frame identifier"));
+    await emote.handler("avatar warny", lab.ctx); await flush();
+    await cycle();
+    assert.equal(warnings().length, 0, "default off: the routine unsupported-frame report is silent");
+    assert.ok(calls.every(call => new Headers(call.init.headers).get("X-Emote-Frame") !== "y o.png"), "an unsupported identifier is still sent on no destination");
+
+    await emote.handler("debugOn", lab.ctx);
+    assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] unsupported-frame warnings on (session-local)", level: "info" });
+    await cycle();
+    const shown = warnings().map(n => n.message);
+    assert.ok(shown.length > 0, "debugOn shows the routine report");
+    assert.ok(shown.every(m => m.endsWith(": externalDisplay: unsupported frame identifier; skipped")), "only the routine report appears");
+    assert.ok(shown.includes("[gentle-emote] destination 1: externalDisplay: unsupported frame identifier; skipped"));
+    assert.ok(shown.includes("[gentle-emote] destination 2: externalDisplay: unsupported frame identifier; skipped"));
+
+    // A sender created while the diagnostic is on observes the toggle too.
+    await emote.handler("d200On", lab.ctx); await flush();
+    await cycle();
+    assert.ok(warnings().map(n => n.message).includes("[gentle-emote] externalDisplay: unsupported frame identifier; skipped"), "a fresh D200 sender observes the session toggle");
+
+    // A recreated destination group keeps observing the session toggle.
+    const dest1 = "[gentle-emote] destination 1: externalDisplay: unsupported frame identifier; skipped";
+    const dest1Before = warnings().filter(n => n.message === dest1).length;
+    await emote.handler("displayOn 10.1.2.3", lab.ctx); await flush();
+    assert.ok(warnings().filter(n => n.message === dest1).length >= dest1Before + 1, "a rebuilt sender reports the routine warning again");
+    await cycle();
+    assert.ok(warnings().filter(n => n.message === dest1).length >= dest1Before + 2, "a rebuilt sender keeps reporting the routine warning again");
+
+    await emote.handler("debugOff", lab.ctx);
+    assert.deepEqual(lab.notices.at(-1), { message: "[gentle-emote] unsupported-frame warnings off (session-local)", level: "info" });
+    const beforeOff = warnings().length;
+    await cycle();
+    assert.equal(warnings().length, beforeOff, "debugOff hides the routine report again");
+    assert.ok(calls.every(call => new Headers(call.init.headers).get("X-Emote-Frame") !== "y o.png"));
+    assert.ok(calls.some(call => new Headers(call.init.headers).get("X-Emote-Frame") === "w.png"), "valid delivery continues untouched");
+
+    const saved = new OutputStateStore(profile).load(() => {});
+    await lab.shutdown(); lab.restore(); lab = undefined;
+    calls.length = 0;
+    lab = await boot(join(root, "project"), ["internalOn", "localOn", "displayOn"], profile);
+    await lab.emit("tool_execution_start", { toolName: "write" }); await flush();
+    await lab.emit("tool_execution_start", { toolName: "bash" }); await flush();
+    const restarted = lab.notices.filter(n => n.level === "warning" && n.message.includes("externalDisplay: unsupported frame identifier"));
+    assert.equal(restarted.length, 0, "every session and restart starts with the diagnostic off");
+    assert.deepEqual(new OutputStateStore(profile).load(() => {}), saved, "debug commands saved no output preference");
+    assert.equal(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).externalDisplay.targets.length, 2, "debug commands rewrite no configuration");
+  } finally {
+    await lab?.shutdown(); lab?.restore(); globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });
   }
 });

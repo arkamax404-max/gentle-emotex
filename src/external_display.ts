@@ -89,6 +89,11 @@ export class ExternalDisplays {
     return count;
   }
 
+  /** Session-local visibility for the routine unsupported-frame report; applies to every destination. */
+  setFrameWarningEnabled(enabled: boolean): void {
+    for (const display of this.displays) display.setFrameWarningEnabled(enabled);
+  }
+
   /** LED/ESP32 destinations are the configured non-loopback targets. */
   setDisplayEnabled(enabled: boolean): number {
     let count = 0;
@@ -202,6 +207,9 @@ export class ExternalDisplay {
   private unclaimableWarned = false;
   private disposed = false;
   private paused = false;
+  // Routine unsupported-frame reports are expected noise on name-restricted
+  // receivers: silent unless the session-local diagnostic opts in. Never persisted.
+  private frameWarnEnabled = false;
   private active: AbortController | null = null;
   private pending: Selection | null = null;
   private selected: SelectedImage | null = null;
@@ -289,6 +297,9 @@ export class ExternalDisplay {
   }
 
   private warn(message: string) { try { this.report(message); } catch { /* sink diagnostics cannot break UI */ } }
+
+  /** Session-local visibility for the routine unsupported-frame report; never persisted. */
+  setFrameWarningEnabled(enabled: boolean): void { this.frameWarnEnabled = enabled; }
 
   /** Control routes exist only on non-loopback exact /emote destinations with session identity. */
   private claimable(): boolean {
@@ -388,7 +399,10 @@ export class ExternalDisplay {
     if (!this.options || this.disposed) return;
     try {
       if (![image.state, image.frame, image.set].every(value => IDENTIFIER.test(value))) {
-        this.warn("externalDisplay: unsupported frame identifier; skipped"); return;
+        // Wire rejection is unchanged; only the report is gated by the session-local
+        // diagnostic, never the skip itself and never any other diagnostic.
+        if (this.frameWarnEnabled) this.warn("externalDisplay: unsupported frame identifier; skipped");
+        return;
       }
       this.selected = { ...image };
       this.idleClock.update(this.activity, performance.now(), image.state);
