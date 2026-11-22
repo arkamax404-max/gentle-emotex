@@ -110,10 +110,16 @@ export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActiv
     // and RUNNING on the display only, without changing the underlying activity.
     // Exactly one known child reads as the singular SUBAGENT with no count.
     const running = isRunningSubagents(activity);
+    // Trial: host ODD detail changes status copy only, below subagent/error priority.
+    // The phase row, its timer, the selected frame and protocol status stay unchanged.
     const statusLabel = running ? ((activity.activeSubagents ?? 0) === 1 ? "SUBAGENT" : "SUBAGENTS")
-      : activity.status === "error" && activity.phase === "idle" ? "IDLE" : activity.status;
-    const label = count > 0 && !(running && count === 1) ? `${statusLabel} (${count > 999 ? "999+" : count})` : statusLabel;
-    drawDisplayText(data, label, statusTop, index => index > statusLabel.length ? [255, 255, 0] : color);
+      : activity.status === "error" && activity.phase === "idle" ? "IDLE"
+      : activity.status !== "error" && isWorkPhase(activity.workPhase) ? activity.workPhase : activity.status;
+    const countLabel = count > 0 && !(running && count === 1) ? `(${count > 999 ? "999+" : count})` : "";
+    // Keep the complete counter inside the existing 16-character font limit.
+    const visibleStatus = countLabel ? statusLabel.slice(0, 15 - countLabel.length) : statusLabel;
+    const label = countLabel ? `${visibleStatus} ${countLabel}` : visibleStatus;
+    drawDisplayText(data, label, statusTop, index => index > visibleStatus.length ? [255, 255, 0] : color);
     const phaseLabel = timedPhaseLabel(resolvePhaseLabel(activity), activity.phaseElapsedSeconds, activity.activeSubagents);
     const clockStart = phaseLabel.includes(":") ? phaseLabel.lastIndexOf(" ") + 1 : phaseLabel.length;
     drawDisplayText(data, phaseLabel, phaseTop, index => index >= clockStart ? [241, 189, 101] : [238, 238, 238]);

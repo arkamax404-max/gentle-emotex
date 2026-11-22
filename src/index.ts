@@ -286,6 +286,8 @@ export default function (pi: ExtensionAPI) {
    * this turn. The native bus always wins; a host clear only reveals this fallback.
    */
   let directWorkPhase: WorkPhase | null = null;
+  // Pi supplies args on start, not end. Keep only the validated phase per call.
+  const pendingDirectPhases = new Map<string, WorkPhase | "clear">();
 
   /** Effective detail phase: the native bus phase, or the direct tool fallback filling the gap. */
   function applyWorkPhase(): void {
@@ -1540,6 +1542,7 @@ export default function (pi: ExtensionAPI) {
     refreshContextUsage(ctx);
     displayActivity.reset();
     directWorkPhase = null;
+    pendingDirectPhases.clear();
     knownSubagentCount = 0;
     sceneSuppressed = false;
     subagentSceneOn = false;
@@ -1621,6 +1624,7 @@ export default function (pi: ExtensionAPI) {
     workPhase.dispose();
     subagentTasks.dispose();
     directWorkPhase = null;
+    pendingDirectPhases.clear();
     knownSubagentCount = 0;
     sceneSuppressed = false;
     subagentSceneOn = false;
@@ -1664,6 +1668,7 @@ export default function (pi: ExtensionAPI) {
     // that arrives first is re-requested, and a host clear before this reset
     // leaves the same cleared state).
     directWorkPhase = null;
+    pendingDirectPhases.clear();
     displayActivity.reset();
     animator.setWorkPhase(null);
     attachWorkPhase();
@@ -1706,6 +1711,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_execution_start", async (event) => {
     if (!widgetActive) return;
+    if (event.toolName === PHASE_TOOL) {
+      pendingDirectPhases.delete(event.toolCallId);
+      const phase = (event.args as { phase?: unknown } | null | undefined)?.phase;
+      if (phase === "clear" || isWorkPhase(phase)) pendingDirectPhases.set(event.toolCallId, phase);
+    }
     displayActivity.toolStart(event.toolName, event.toolCallId);
     runUsedTools = true;
     if (FAREWELL_TOOLS.has(event.toolName)) startFarewell();
@@ -1716,11 +1726,14 @@ export default function (pi: ExtensionAPI) {
     if (!widgetActive) return;
     // A successful explicit phase call is adopted before the post-tool scene so
     // the outgoing frame and headers already wear the named phase.
-    // `tool_execution_end` carries the call arguments at runtime on hosts that
-    // include them, but the shipped event type does not declare the field, so it
-    // is read defensively instead of pretending it exists.
+    // Prefer the captured start phase. Optional end args retain compatibility
+    // with older hosts; ordinary tools keep their existing end-argument path.
     const args = (event as { args?: unknown }).args;
-    if (event.toolName === PHASE_TOOL) adoptDirectPhase(args, event.isError);
+    if (event.toolName === PHASE_TOOL) {
+      const phase = pendingDirectPhases.get(event.toolCallId);
+      pendingDirectPhases.delete(event.toolCallId); // Consume failures too; never replay a captured call.
+      adoptDirectPhase(phase === undefined ? args : { phase }, event.isError);
+    }
     displayActivity.toolEnd(event.toolCallId, event.isError);
     if (farewell) return;
     if (event.isError) {
@@ -1761,6 +1774,7 @@ export default function (pi: ExtensionAPI) {
     if (!widgetActive) return;
     refreshContextUsage(ctx);
     directWorkPhase = null;
+    pendingDirectPhases.clear();
     sceneSuppressed = true;
     displayActivity.reset();
     if (runHadError) displayActivity.set("error", "idle");

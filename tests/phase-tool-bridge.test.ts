@@ -4,6 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boot } from "./integration.test.ts";
+import { decodePng } from "../src/png.ts";
+import { drawDisplayText } from "../src/display_text.ts";
 
 const SESSION_ID = "integration-session";
 const PHASE_CHANGE = "gentle-pi:odd-phase/v1";
@@ -140,6 +142,98 @@ test("turn and session boundaries clear the direct phase; no stale phase next tu
     assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null, "no stale phase on the next turn");
   });
 });
+
+// Pi's public event contract supplies args on start, never on end.
+const realEnd = (toolCallId: string, isError = false, toolName = "gentle_odd_phase") => ({
+  toolName, toolCallId, result: { content: [] }, isError,
+});
+const realStart = (toolCallId: string, phase: unknown) => ({
+  toolName: "gentle_odd_phase", toolCallId, args: { phase },
+});
+
+test("real Pi events recover all explicit phases into the PNG status only after success", async () => {
+  await withLab(async (lab) => {
+    await lab.emit("agent_start");
+    let previous: string | null = null;
+    for (const phase of ["authorizing", "exploring", "researching", "deciding", "planning", "implementing", "checking", "closing"]) {
+      await lab.emit("tool_execution_start", realStart(phase, phase));
+      await flush();
+      assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), previous, "start alone never adopts");
+      await lab.emit("tool_execution_end", realEnd(phase));
+      await flush();
+      const last = lab.calls.at(-1)!;
+      assert.equal(header(last, "X-Emote-Work-Phase"), phase);
+      assert.equal(header(last, "X-Emote-Status"), "busy", "coarse status remains truthful");
+      const image = decodePng(Buffer.from(last.body as Uint8Array));
+      const expected = new Uint8Array(64 * 64 * 4);
+      for (let i = 3; i < expected.length; i += 4) expected[i] = 255;
+      drawDisplayText(expected, phase, 51, [255, 208, 96]);
+      assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), expected.slice(51 * 64 * 4, 56 * 64 * 4), "actual outgoing PNG spells the ODD status");
+      await lab.commands.get("emote").handler("status", lab.ctx);
+      assert.match(lab.notices.at(-1)!.message, new RegExp(`phase ${phase} \\(source: direct\\)`));
+      previous = phase;
+    }
+    await lab.emit("tool_execution_start", realStart("clear", "clear"));
+    await lab.emit("tool_execution_end", realEnd("clear"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null, "successful real clear removes detail");
+  });
+});
+
+test("real Pi calls correlate by id, finish out of order, and consume each captured phase once", async () => {
+  await withLab(async (lab) => {
+    await lab.emit("tool_execution_start", realStart("a", "exploring"));
+    await lab.emit("tool_execution_start", realStart("b", "planning"));
+    await lab.emit("tool_execution_end", realEnd("a", false, "read"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null, "another tool cannot adopt a captured phase");
+    await lab.emit("tool_execution_end", realEnd("b"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), "planning");
+    await lab.emit("tool_execution_end", realEnd("a"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), "exploring");
+    await lab.emit("tool_execution_end", realEnd("b"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), "exploring", "duplicate end cannot replay planning");
+  });
+});
+
+test("failed real Pi calls discard captured phases and never clear a successful phase", async () => {
+  await withLab(async (lab) => {
+    await lab.emit("tool_execution_start", realStart("failed", "exploring"));
+    await lab.emit("tool_execution_end", realEnd("failed", true));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null);
+    await lab.emit("tool_execution_end", realEnd("failed"));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null, "failure consumes the pending phase too");
+    await lab.emit("tool_execution_start", realStart("good", "planning"));
+    await lab.emit("tool_execution_end", realEnd("good"));
+    await lab.emit("tool_execution_start", realStart("failed-clear", "clear"));
+    await lab.emit("tool_execution_end", realEnd("failed-clear", true));
+    await flush();
+    assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), "planning");
+  });
+});
+
+for (const boundary of ["agent_start", "agent_end", "session_start", "session_shutdown"]) {
+  test(`real Pi pending phases cannot cross ${boundary}`, async () => {
+    await withLab(async (lab) => {
+      await lab.emit("tool_execution_start", realStart("stale", "exploring"));
+      await lab.emit(boundary);
+      if (boundary === "session_shutdown") await lab.emit("session_start");
+      if (boundary === "agent_end") await lab.emit("agent_start");
+      await lab.emit("tool_execution_end", realEnd("stale"));
+      await flush();
+      assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), null);
+      await lab.emit("tool_execution_start", realStart("fresh", "planning"));
+      await lab.emit("tool_execution_end", realEnd("fresh"));
+      await flush();
+      assert.equal(header(lab.calls.at(-1)!, "X-Emote-Work-Phase"), "planning", "the boundary does not disable later calls");
+    });
+  });
+}
 
 test("ordinary tools keep their behavior even with phase-shaped args", async () => {
   await withLab(async (lab) => {

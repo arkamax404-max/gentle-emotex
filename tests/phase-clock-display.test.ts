@@ -32,6 +32,32 @@ function assertPhase(body: Uint8Array, label: string, top = 54) {
   assert.deepEqual(image.data.slice(top * 64 * 4, (top + 5) * 64 * 4), expected.slice(top * 64 * 4, (top + 5) * 64 * 4), label);
 }
 
+test("ODD status text changes preserve the selected phase clock and protocol status", async t => {
+  const advance = virtualTime(t), calls: RequestInit[] = [];
+  const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });
+  const last = () => calls.at(-1)!;
+  try {
+    sender.updateActivity({ ...busy, workPhase: "planning" }); sender.select(frame("read")); await flush();
+    await advance(6000); assertPhase(last().body as Uint8Array, "READING 00:06");
+    const previous = decodePng(Buffer.from(last().body as Uint8Array));
+    sender.updateActivity({ ...busy, workPhase: "exploring" }); await flush();
+    const current = decodePng(Buffer.from(last().body as Uint8Array));
+    const expected = new Uint8Array(64 * 64 * 4);
+    for (let i = 3; i < expected.length; i += 4) expected[i] = 255;
+    drawDisplayText(expected, "EXPLORING", 44, [255, 208, 96]);
+    assert.deepEqual(current.data.slice(44 * 64 * 4, 49 * 64 * 4), expected.slice(44 * 64 * 4, 49 * 64 * 4));
+    assert.deepEqual(current.data.slice(0, 44 * 64 * 4), previous.data.slice(0, 44 * 64 * 4));
+    assert.deepEqual(current.data.slice(49 * 64 * 4), previous.data.slice(49 * 64 * 4));
+    assertPhase(last().body as Uint8Array, "READING 00:06");
+    const headers = new Headers(last().headers);
+    assert.equal(headers.get("X-Emote-Status"), "busy");
+    assert.equal(headers.get("X-Emote-State"), "read");
+    assert.equal(headers.get("X-Emote-Phase"), "thinking");
+    assert.equal(headers.get("X-Emote-Work-Phase"), "exploring");
+    await advance(1000); assertPhase(last().body as Uint8Array, "READING 00:07");
+  } finally { sender.dispose(); }
+});
+
 test("phase clock appears strictly after five seconds, ticks, preserves artwork and resets only on visible phase changes", async t => {
   const advance = virtualTime(t), calls: RequestInit[] = [];
   const sender = new ExternalDisplay(options, async (_url, init) => { calls.push(init!); return new Response(); });

@@ -4,6 +4,7 @@ import { encodePng, decodePng } from "../src/png.ts";
 import { prepareDisplayImage } from "../src/display_image.ts";
 import { drawDisplayText } from "../src/display_text.ts";
 import { EMOTE_STATES } from "../src/types.ts";
+import { WORK_PHASES } from "../src/work_phase.ts";
 
 const pixel = (image: ReturnType<typeof decodePng>, x: number, y: number) => [...image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 4)];
 const statusRow = (image: ReturnType<typeof decodePng>) => image.data.slice(44 * 64 * 4, 49 * 64 * 4);
@@ -14,6 +15,44 @@ const referenceRow = (top: number, text: string, color: readonly number[] | ((in
   drawDisplayText(data, text, top, color);
   return data.slice(top * 64 * 4, (top + 5) * 64 * 4);
 };
+// Preserve full-image comparisons while changing only the newly specified row.
+const withStatusText = (png: Buffer, text: string) => {
+  const image = decodePng(png);
+  image.data.set(referenceRow(44, text, [255, 208, 96]), 44 * 64 * 4);
+  return encodePng(image);
+};
+
+test("ODD status text uses the host detail without changing other pixels or activity", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 128]) }).toString("base64");
+  for (const projectName of [undefined, "trial"] as const) {
+    const top = projectName ? 51 : 44;
+    for (const status of ["busy", "idle", "error"] as const) {
+      const color = status === "error" ? [255, 96, 96] : status === "busy" ? [255, 208, 96] : [128, 224, 160];
+      for (const activeSubagents of [0, 2, 1000]) {
+        const base = { status, phase: "executing", state: "read", activeSubagents, phaseElapsedSeconds: 38 } as const;
+        const render = (activity: typeof base & { workPhase?: unknown }) => decodePng(prepareDisplayImage(base64, activity as never, "#404040", 0.75, undefined, false, projectName));
+        const plain = render(base);
+        for (const workPhase of WORK_PHASES) {
+          const activity = Object.freeze({ ...base, workPhase });
+          const snapshot = { ...activity };
+          const image = render(activity);
+          const label = status === "error" ? "error" : workPhase;
+          const suffix = activeSubagents ? ` (${activeSubagents > 999 ? "999+" : activeSubagents})` : "";
+          const shown = label.slice(0, 16 - suffix.length);
+          const text = `${shown}${suffix}`;
+          assert.deepEqual(image.data.slice(top * 64 * 4, (top + 5) * 64 * 4), referenceRow(top, text, index => index > shown.length ? [255, 255, 0] : color), `${projectName}/${status}/${workPhase}/${activeSubagents}`);
+          assert.deepEqual(image.data.slice(0, top * 64 * 4), plain.data.slice(0, top * 64 * 4), "caption, artwork, background and padding stay identical");
+          assert.deepEqual(image.data.slice((top + 5) * 64 * 4), plain.data.slice((top + 5) * 64 * 4), "phase row, elapsed clock and remaining pixels stay identical");
+          assert.deepEqual(activity, snapshot, "text presentation never mutates activity");
+        }
+        for (const workPhase of [undefined, null, "hacking", "PLANNING", 42]) {
+          assert.deepEqual(render({ ...base, workPhase }), plain, "missing or invalid ODD detail keeps the existing complete image");
+        }
+      }
+    }
+  }
+});
+
 test("zero or omitted agent counts render only the centered status without parentheses", () => {
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
   const plain = decodePng(prepareDisplayImage(base64));
@@ -230,7 +269,7 @@ test("error at idle with one running subagent shows red SUBAGENT beside a timed 
   const plain = decodePng(prepareDisplayImage(base64));
   // Exact user-reported state: the parent errored, went idle, and a worker is still running.
   const image = decodePng(prepareDisplayImage(base64, {
-    status: "error", phase: "idle", activeSubagents: 1, state: "delegate", phaseElapsedSeconds: 38,
+    status: "error", phase: "idle", activeSubagents: 1, state: "delegate", workPhase: "planning", phaseElapsedSeconds: 38,
   }));
   assert.deepEqual(statusRow(image), referenceRow(44, "SUBAGENT", [255, 96, 96]), "the status row spells SUBAGENT in the error red ink with no count");
   const clockStart = "RUNNING 00:38".lastIndexOf(" ") + 1;
@@ -265,7 +304,7 @@ test("error at idle with subagents keeps error red and RUNNING under a selected 
     assert.deepEqual(phaseRow(image), referenceRow(54, "RUNNING", [238, 238, 238]), state);
   }
   // No-count error-idle keeps the plain red IDLE behavior.
-  const idle = decodePng(prepareDisplayImage(base64, { status: "error", phase: "idle" }));
+  const idle = decodePng(prepareDisplayImage(base64, { status: "error", phase: "idle", workPhase: "planning" }));
   assert.deepEqual(statusRow(idle), referenceRow(44, "IDLE", [255, 96, 96]));
   assert.deepEqual(phaseRow(idle), referenceRow(54, "idle", [238, 238, 238]));
 });
@@ -356,7 +395,7 @@ test("the detailed work phase replaces the phase row only while the coarse label
   // Waiting, compacting, idle and responding keep their own truthful labels.
   for (const phase of ["idle", "responding", "waiting", "compacting"] as const) {
     const plain = render({ status: "busy", phase });
-    assert.deepEqual(render({ status: "busy", phase, workPhase: "implementing" }), plain, phase);
+    assert.deepEqual(render({ status: "busy", phase, workPhase: "implementing" }), withStatusText(plain, "IMPLEMENTING"), `${phase}: only the status row changes`);
   }
 
   // Invalid detail falls back to the coarse label; omitting it stays supported.
@@ -373,15 +412,15 @@ test("the selected PNG state is the truthful detail label regardless of the coar
   // A selected exploring state labels exploring instead of the generic coarse label.
   assert.notDeepEqual(render({ ...thinking, state: "exploring" }), render(thinking));
   assert.deepEqual(
-    render({ ...executing, state: "exploring" }),
+    withStatusText(render({ ...executing, state: "exploring" }), "EXPLORING"),
     render({ ...thinking, workPhase: "exploring" }),
-    "the selected state renders the same bytes as the existing detailed work-phase path",
+    "the phase and artwork match; only published ODD detail changes the status text",
   );
 
   // The selected state wins over a different published work phase.
   assert.deepEqual(
     render({ ...thinking, state: "exploring", workPhase: "planning" }),
-    render({ ...thinking, state: "exploring" }),
+    withStatusText(render({ ...thinking, state: "exploring" }), "PLANNING"),
   );
   assert.notDeepEqual(
     render({ ...thinking, state: "exploring", workPhase: "planning" }),
@@ -390,7 +429,7 @@ test("the selected PNG state is the truthful detail label regardless of the coar
 
   // Each of the eight host phases renders through the selected state.
   for (const phase of ["authorizing", "exploring", "researching", "deciding", "planning", "implementing", "checking", "closing"] as const) {
-    assert.deepEqual(render({ ...executing, state: phase }), render({ ...thinking, workPhase: phase }), phase);
+    assert.deepEqual(withStatusText(render({ ...executing, state: phase }), phase), render({ ...thinking, workPhase: phase }), phase);
     assert.notDeepEqual(render({ ...executing, state: phase }), render(executing), phase);
   }
 
@@ -408,7 +447,7 @@ test("the selected PNG state is the truthful detail label regardless of the coar
     );
     assert.deepEqual(
       render({ status: "busy", phase, state: "exploring", workPhase: "planning" }),
-      render({ status: "busy", phase: "thinking", state: "exploring" }),
+      withStatusText(render({ status: "busy", phase: "thinking", state: "exploring" }), "PLANNING"),
       phase,
     );
   }

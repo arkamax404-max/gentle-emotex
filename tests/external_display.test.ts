@@ -590,12 +590,18 @@ test("work phase metadata stays additive, validated and deduplicated without ove
     sender.select(frame("detail.png")); await tick();
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Work-Phase"), "planning");
 
-    // Both requests have the same selected idle state and busy top row without a zero-count suffix.
-    // Coarse/host metadata still changes HTTP headers, but not the selected label.
+    // The selected idle phase/artwork stay fixed; only the status text follows ODD.
+    // Build an independent whole-image oracle by replacing just those five rows.
     const selectedIdle = calls.at(-1)!.body;
+    const expectedImplementing = decodePng(Buffer.from(selectedIdle as Uint8Array));
+    const status = new Uint8Array(64 * 64 * 4);
+    for (let i = 3; i < status.length; i += 4) status[i] = 255;
+    drawDisplayText(status, "IMPLEMENTING", 44, [255, 208, 96]);
+    expectedImplementing.data.set(status.slice(44 * 64 * 4, 49 * 64 * 4), 44 * 64 * 4);
     sender.updateActivity({ status: "busy", phase: "executing", activeSubagents: 0, workPhase: "implementing" });
     await tick();
-    assert.deepEqual(calls.at(-1)!.body, selectedIdle, "coarse and work phase changes do not relabel the selected idle state");
+    assert.deepEqual(calls.at(-1)!.body, encodePng(expectedImplementing), "only status text changes; selected idle phase, artwork and all other pixels remain identical");
+    assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Status"), "busy", "visible ODD text never changes the protocol status");
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-State"), "idle");
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Phase"), "executing");
     assert.equal(new Headers(calls.at(-1)!.headers).get("X-Emote-Work-Phase"), "implementing");
