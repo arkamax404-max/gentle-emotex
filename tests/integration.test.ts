@@ -765,9 +765,16 @@ test("local defaults on; independent global switches survive project changes and
   }
   const originalFetch = globalThis.fetch;
   const calls: string[] = [];
-  globalThis.fetch = async (url) => { calls.push(String(url)); return new Response(); };
+  const traffic: { url: string; project: string | null; stream: string | null }[] = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(String(url));
+    const headers = new Headers(init?.headers);
+    traffic.push({ url: String(url), project: headers.get("X-Emote-Project-Name"), stream: headers.get("X-Emote-Stream-Id") });
+    return new Response();
+  };
   const flush = () => new Promise<void>(resolve => setImmediate(resolve));
   let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  const diagnostic = () => JSON.stringify({ notices: lab?.notices, traffic });
   try {
     lab = await boot(join(root, "a"), [], profile);
     await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
@@ -796,15 +803,19 @@ test("local defaults on; independent global switches survive project changes and
     lab.widgets.render(100);
     assert.ok(lab.editor.render(100).join("").includes(PLACEHOLDER));
     await emote.handler("displayOn", lab.ctx); await flush();
+    assert.ok(!lab.notices.some(notice => notice.message.includes("cannot save global display state")), `displayOn must save before restart: ${diagnostic()}`);
+    assert.ok(calls.includes("http://matrix/emote"), `the second displayOn must deliver before restart: ${diagnostic()}`);
     await lab.shutdown(); lab.restore(); lab = undefined;
     calls.length = 0;
+    traffic.length = 0;
     lab = await boot(join(root, "b"), [], profile);
+    assert.ok(!lab.notices.some(notice => notice.message.includes("cannot read saved display state")), `displayOn restore must not fail closed: ${diagnostic()}`);
     await lab.emit("tool_execution_start", { toolName: "read" }); await flush();
     lab.widgets.render(100);
     assert.ok(lab.editor.render(100).join("").includes(PLACEHOLDER), "global internalOn survives restart in another project");
     assert.ok(calls.includes("http://localhost:8000/emote"));
     assert.ok(!calls.includes("http://127.0.0.1:8003/emote"), "the D200 mirror is session-local: a restart starts off even after d200On");
-    assert.ok(calls.includes("http://matrix/emote"), "global displayOn survives restart");
+    assert.ok(calls.includes("http://matrix/emote"), `global displayOn survives restart: ${diagnostic()}`);
     assert.ok(!calls.includes("http://disabled/emote"), "On never enables disabled destinations");
     for (const output of ["internalOff", "localOff", "d200Off", "displayOff"]) await lab.commands.get("emote").handler(output, lab.ctx);
     const store = new OutputStateStore(profile);
