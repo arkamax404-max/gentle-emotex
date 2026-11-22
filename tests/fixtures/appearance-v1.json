@@ -1,0 +1,14 @@
+[
+  {"name":"valid-defaults","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true}}","expectedStatus":"ready"},
+  {"name":"unknown-nested-safe-integers-unicode-pair","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":{\"bounds\":[-9007199254740991,9007199254740991],\"\\uD83D\\uDE00\":[null,true,\"\\uD83D\\uDE03\"]}}","expectedStatus":"ready"},
+  {"name":"unknown-fraction","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":1.0}","expectedStatus":"invalid"},
+  {"name":"unknown-exponent","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":1e0}","expectedStatus":"invalid"},
+  {"name":"unknown-unsafe-integer","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":9007199254740992}","expectedStatus":"invalid"},
+  {"name":"nested-duplicate","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":{\"x\":1,\"x\":2}}","expectedStatus":"invalid"},
+  {"name":"nested-escaped-duplicate","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":{\"x\":1,\"\\u0078\":2}}","expectedStatus":"invalid"},
+  {"name":"leading-bom","raw":"\ufeff{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true}}","expectedStatus":"invalid"},
+  {"name":"lone-surrogate-key","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":{\"\\uD800\":0}}","expectedStatus":"invalid"},
+  {"name":"lone-surrogate-value","raw":"{\"version\":1,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true},\"unknown\":[\"\\uDC00\"]}","expectedStatus":"invalid"},
+  {"name":"unsupported-version","raw":"{\"version\":2,\"revision\":0,\"desktop\":{\"backgroundRgb\":[0,0,0],\"backgroundOpacity\":55,\"transparentBackground\":true}}","expectedStatus":"invalid"},
+  {"name":"missing-desktop","raw":"{\"version\":1,\"revision\":0}","expectedStatus":"invalid"}
+]
