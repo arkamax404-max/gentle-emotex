@@ -62,13 +62,43 @@ test("zero or omitted agent counts render only the centered status without paren
         const activity = { status, phase, ...count };
         const snapshot = { ...activity };
         const image = decodePng(prepareDisplayImage(base64, activity));
-        const label = status === "error" && phase === "idle" ? "IDLE" : status;
+        const label = status === "error" && phase === "idle" ? "IDLE" : status === "busy" ? "working" : status;
         assert.deepEqual(statusRow(image), referenceRow(44, label, color), `${status}/${phase}/${JSON.stringify(count)}`);
         assert.deepEqual(image.data.slice(0, 44 * 64 * 4), plain.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");
         assert.deepEqual(activity, snapshot, "presentation never changes activity");
       }
     }
   }
+});
+
+test("busy executing displays WORKING with unchanged ink, priority and inputs", () => {
+  const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([200, 80, 40, 255]) }).toString("base64");
+  const plain = decodePng(prepareDisplayImage(base64));
+  const render = (activity: Record<string, unknown>) => decodePng(prepareDisplayImage(base64, activity as never));
+  const zero = render({ status: "busy", phase: "executing", activeSubagents: 0 });
+  // The final fallback copy renames busy to WORKING: same amber ink, yellow count and 999+ cap.
+  for (const activeSubagents of [0, 2, 1000]) {
+    const count = activeSubagents > 999 ? "999+" : String(activeSubagents);
+    const suffix = activeSubagents > 0 ? ` (${count})` : "";
+    const activity = Object.freeze({ status: "busy", phase: "executing", activeSubagents });
+    const snapshot = { ...activity };
+    const image = render(activity as never);
+    assert.deepEqual(statusRow(image), referenceRow(44, `working${suffix}`, index => index > "working".length ? [255, 255, 0] : [255, 208, 96]), `${activeSubagents}: busy displays WORKING`);
+    assert.deepEqual(image.data.slice(0, 44 * 64 * 4), zero.data.slice(0, 44 * 64 * 4), "artwork and padding are unchanged");
+    assert.deepEqual(image.data.slice(49 * 64 * 4), zero.data.slice(49 * 64 * 4), "the phase row and bottom padding are unchanged");
+    assert.deepEqual(image.data.slice(59 * 64 * 4), plain.data.slice(59 * 64 * 4), "bottom padding is unchanged");
+    assert.deepEqual(activity, snapshot, "display copy never mutates activity");
+  }
+  // The published ODD phase keeps priority over the renamed fallback copy.
+  assert.deepEqual(statusRow(render({ status: "busy", phase: "executing", activeSubagents: 2, workPhase: "planning" })),
+    referenceRow(44, "planning (2)", index => index > "planning".length ? [255, 255, 0] : [255, 208, 96]), "PLANNING still overrides the fallback");
+  // Error and idle copy, ink and subagent priority are unchanged.
+  assert.deepEqual(statusRow(render({ status: "error", phase: "executing" })), referenceRow(44, "error", [255, 96, 96]), "non-idle errors stay ERROR in red");
+  assert.deepEqual(statusRow(render({ status: "error", phase: "idle" })), referenceRow(44, "idle", [255, 96, 96]), "idle errors stay IDLE in red");
+  assert.deepEqual(statusRow(render({ status: "idle", phase: "idle", activeSubagents: 2 })),
+    referenceRow(44, "SUBAGENTS (2)", index => index > "SUBAGENTS".length ? [255, 255, 0] : [128, 224, 160]), "idle subagent priority stays");
+  assert.deepEqual(phaseRow(render({ status: "idle", phase: "idle", activeSubagents: 2 })), referenceRow(54, "RUNNING", [238, 238, 238]), "idle subagents still show RUNNING");
+  assert.deepEqual(statusRow(render({ status: "idle", phase: "idle" })), referenceRow(44, "idle", [128, 224, 160]), "ordinary idle stays IDLE");
 });
 
 test("phase labels use near-white gray #eeeeee for coarse, selected, host and running states", () => {
@@ -93,7 +123,7 @@ test("transparent avatar preserves source RGBA and leaves padding and label gaps
   const activity = { status: "busy", phase: "thinking", activeSubagents: 2 } as const;
   const expected = new Uint8Array(64 * 64 * 4);
   expected.set(source, (19 * 64 + 30) * 4);
-  drawDisplayText(expected, "BUSY (2)", 44, index => index > 4 ? [255, 255, 0] : [255, 208, 96]);
+  drawDisplayText(expected, "WORKING (2)", 44, index => index > 7 ? [255, 255, 0] : [255, 208, 96]);
   drawDisplayText(expected, "THINKING", 54, [238, 238, 238]);
   for (const [background, coverage] of [["#404040", 0], ["#abcdef", 0.75], ["#000000", 1]] as const) {
     const image = decodePng(prepareDisplayImage(base64, activity, background, coverage, undefined, true));
@@ -181,7 +211,7 @@ test("agent count and parentheses are yellow while status retains its color", ()
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) }).toString("base64");
   for (const [status, color] of [["idle", [128, 224, 160]], ["busy", [255, 208, 96]], ["error", [255, 96, 96]]] as const) {
     // Both-idle subagents show SUBAGENTS for idle and error; only busy keeps its own label.
-    const displayed = status === "busy" ? "busy" : "SUBAGENTS";
+    const displayed = status === "busy" ? "working" : "SUBAGENTS";
     const image = decodePng(prepareDisplayImage(base64, { status, phase: "idle", activeSubagents: 2 }));
     const left = Math.floor((64 - ((displayed.length + 4) * 4 - 1)) / 2);
     let yellow = 0;
@@ -246,7 +276,7 @@ test("the SUBAGENTS override applies only when both status and phase are idle wi
   const base64 = encodePng({ width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) }).toString("base64");
   const render = (activity: Record<string, unknown>) => decodePng(prepareDisplayImage(base64, activity as never));
   const idleCount = (count: string) => referenceRow(44, count === "0" ? "idle" : `idle (${count})`, index => index > 4 ? [255, 255, 0] : [128, 224, 160]);
-  const busyCount = (count: string) => referenceRow(44, `busy (${count})`, index => index > 4 ? [255, 255, 0] : [255, 208, 96]);
+  const busyCount = (count: string) => referenceRow(44, `working (${count})`, index => index > 7 ? [255, 255, 0] : [255, 208, 96]);
 
   // Zero subagents keeps the ordinary idle labels on both rows.
   const plain = render({ status: "idle", phase: "idle" });
@@ -537,7 +567,7 @@ test("a project name compacts the local PNG into the approved captioned layout",
 
   // Row 50 stays a clear separator; status sits at 51..55 and phase at 58..62.
   clearRow(image, 50, "status separator stays clear");
-  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "busy", [255, 208, 96]), "status row moves to 51");
+  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "working", [255, 208, 96]), "status row moves to 51");
   clearRow(image, 56, "two-pixel line gap");
   clearRow(image, 57, "two-pixel line gap");
   assert.deepEqual(image.data.slice(58 * 64 * 4, 63 * 64 * 4), referenceRow(58, "EXECUTING", [238, 238, 238]), "phase row moves to 58");
@@ -549,7 +579,7 @@ test("a caption ink override recolors only the title, leaving status and phase i
   const activity = { status: "busy", phase: "executing" } as const;
   const image = decodePng(prepareDisplayImage(base64, activity, "#000000", 1, undefined, false, "my_repo", [0, 255, 0]));
   assert.deepEqual(image.data.slice(1 * 64 * 4, 6 * 64 * 4), referenceRow(1, "MY_REPO", [0, 255, 0]), "the override ink recolors the caption");
-  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "busy", [255, 208, 96]), "status keeps its own ink");
+  assert.deepEqual(image.data.slice(51 * 64 * 4, 56 * 64 * 4), referenceRow(51, "working", [255, 208, 96]), "status keeps its own ink");
   assert.deepEqual(image.data.slice(58 * 64 * 4, 63 * 64 * 4), referenceRow(58, "EXECUTING", [238, 238, 238]), "phase keeps its own ink");
 });
 

@@ -112,9 +112,11 @@ export function prepareDisplayImage(base64: string, activity?: Pick<DisplayActiv
     const running = isRunningSubagents(activity);
     // Trial: host ODD detail changes status copy only, below subagent/error priority.
     // The phase row, its timer, the selected frame and protocol status stay unchanged.
+    // The fallback busy copy is displayed as WORKING; internal status and headers stay busy.
     const statusLabel = running ? ((activity.activeSubagents ?? 0) === 1 ? "SUBAGENT" : "SUBAGENTS")
       : activity.status === "error" && activity.phase === "idle" ? "IDLE"
-      : activity.status !== "error" && isWorkPhase(activity.workPhase) ? activity.workPhase : activity.status;
+      : activity.status !== "error" && isWorkPhase(activity.workPhase) ? activity.workPhase
+      : activity.status === "busy" ? "working" : activity.status;
     const countLabel = count > 0 && !(running && count === 1) ? `(${count > 999 ? "999+" : count})` : "";
     // Keep the complete counter inside the existing 16-character font limit.
     const visibleStatus = countLabel ? statusLabel.slice(0, 15 - countLabel.length) : statusLabel;

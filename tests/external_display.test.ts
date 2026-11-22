@@ -685,7 +685,7 @@ test("idle-error delivery with active subagents displays RUNNING but preserves e
     const original = decodePng(Buffer.from(calls[0]!.body as Uint8Array));
     for (const [status, phase, label, color] of [
       ["error", "idle", "SUBAGENTS", [255, 96, 96]],
-      ["busy", "idle", "BUSY", [255, 208, 96]],
+      ["busy", "idle", "WORKING", [255, 208, 96]],
       ["error", "executing", "ERROR", [255, 96, 96]],
     ] as const) {
       const activity = { status, phase, activeSubagents: 2 };

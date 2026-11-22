@@ -115,7 +115,7 @@ test("one resting parent with one child reads SUBAGENT and RUNNING without inven
   }
   // A busy parent keeps its own labels and count; no invented child phase.
   const busy = decodePng(prepareDisplayImage(base64, { status: "busy", phase: "executing", activeSubagents: 1, state: "read" }));
-  assert.deepEqual(statusRow(busy), referenceRow(44, "busy (1)", index => index > 4 ? [255, 255, 0] : [255, 208, 96]));
+  assert.deepEqual(statusRow(busy), referenceRow(44, "working (1)", index => index > 7 ? [255, 255, 0] : [255, 208, 96]));
   assert.deepEqual(phaseRow(busy), referenceRow(54, "READING", [238, 238, 238]));
 });
 
