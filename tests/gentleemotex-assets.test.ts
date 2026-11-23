@@ -35,9 +35,9 @@ const EXPECTED_FILES = [
   "failure/failure_3.png",
   "grandma/in_1.png",
   "grandma/in_2.png",
-  "grandma/in_3.png",
   "grandma/knit_1.png",
   "grandma/knit_2.png",
+  "grandma/knit_3.png",
   "grandma_old/in_1.png",
   "grandma_old/in_2.png",
   "grandma_old/in_3.png",
@@ -61,6 +61,7 @@ const EXPECTED_FILES = [
   "jobs/jobs_3.png",
   "judge/judge_1.png",
   "judge/judge_2.png",
+  "ovejita_24x18.png",
   "read/read_1.png",
   "read/read_2.png",
   "read/read_3.png",
@@ -155,9 +156,9 @@ const GOLDEN_FILES: ReadonlyArray<readonly [file: string, sha256: string, bytes:
   ["failure/failure_3.png", "73ba0a2fc6dc2acf393e8c71077021fed641f6b35460042fd1989793d8da65e3", 560],
   ["grandma/in_1.png", "e0b458739bc9c3b24301f19a1fab08d50a4565169281bb23ad828c8cccfb11d7", 408],
   ["grandma/in_2.png", "00dbf3a9c18f7e01395560c1a316327091f90f624c9f19d46a7887ba24fd28a9", 290],
-  ["grandma/in_3.png", "de271a8d0e3be1d665bfee9f6038085d6e92f0e276d419429eb71e37c369c08b", 1758],
-  ["grandma/knit_1.png", "288c284ac0909a680507f4b72bcaa8998b70b8a67e540537a5511387e30080ac", 1327],
-  ["grandma/knit_2.png", "d88ff98dc8067c9fbdf0a1b34a58f10ef4fc612ba20fe8433be3233d1b6482de", 1321],
+  ["grandma/knit_1.png", "67bd6bd323467abc0a827ca745bc4b6657c2ac269e7c837466f95c6911eccad9", 1572],
+  ["grandma/knit_2.png", "10688fac8e7100b9283427c3fa9c4f98b8ce51a786881cc255c6f654cc8216d1", 1471],
+  ["grandma/knit_3.png", "014a21d4fdc2fb9544060fa96db0d7a45b20380675d744b01ee25935e5d495a0", 1500],
   ["grandma_old/in_1.png", "e0b458739bc9c3b24301f19a1fab08d50a4565169281bb23ad828c8cccfb11d7", 408],
   ["grandma_old/in_2.png", "00dbf3a9c18f7e01395560c1a316327091f90f624c9f19d46a7887ba24fd28a9", 290],
   ["grandma_old/in_3.png", "c267d194e4d3e1ed8f45ee76df9f0c3fc020d788295e4e401d3d2f1043f110e2", 549],
@@ -181,6 +182,7 @@ const GOLDEN_FILES: ReadonlyArray<readonly [file: string, sha256: string, bytes:
   ["jobs/jobs_3.png", "5eb119cc3eb83d89e9369ab5988731991e0d2b065db1d3493aebad99bc0bd04f", 570],
   ["judge/judge_1.png", "e1865b4bdf8b73702ebd88c512e58df8c37038690055d9c199e25955cd457a88", 547],
   ["judge/judge_2.png", "8918890bda4595cd49595b1334d7cf203fdfc7ecb4b7e7d1623513e8ca91ea43", 559],
+  ["ovejita_24x18.png", "c47597838d513dd86efa9ffaee46c5c4e328a56b146f61936b568275f44cdd1f", 323],
   ["read/read_1.png", "9e80d0507c6b7744df624151f2c5713aca782eb2677fe767e9e662b910280d7f", 526],
   ["read/read_2.png", "ef3d5eaf6727a71f62faa42e4a7b3143dd42d4fd504ad55c76546cfda72b0cbc", 556],
   ["read/read_3.png", "f44cda093e6a94eab3595b7bd0a1dac791929cc61964235c800042deadc56328", 562],
@@ -216,7 +218,7 @@ const GOLDEN_FILES: ReadonlyArray<readonly [file: string, sha256: string, bytes:
 ];
 
 test("every imported gentleemotex file keeps its exact approved bytes: static SHA256 goldens", () => {
-  assert.equal(GOLDEN_FILES.length, 82, "one golden per imported file");
+  assert.equal(GOLDEN_FILES.length, 83, "one golden per imported file");
   const actual = collect(SET);
   assert.deepEqual(
     actual,
@@ -231,10 +233,10 @@ test("every imported gentleemotex file keeps its exact approved bytes: static SH
   }
 });
 
-test("the imported gentleemotex set is complete: every frame decodes 48x40 with binary alpha", () => {
+test("the gentleemotex set is complete: frames decode 48x40 and the sheep asset 24x18 with binary alpha", () => {
   const actual = collect(SET);
   assert.deepEqual(actual, EXPECTED_FILES, "the set keeps its exact imported inventory");
-  assert.equal(actual.filter((file) => file.endsWith(".png")).length, 81);
+  assert.equal(actual.filter((file) => file.endsWith(".png")).length, 82);
 
   const stateDirs = readdirSync(SET, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
   assert.deepEqual(stateDirs, [
@@ -246,7 +248,7 @@ test("the imported gentleemotex set is complete: every frame decodes 48x40 with 
   for (const file of actual) {
     if (!file.endsWith(".png")) continue;
     const png = decodePng(readFileSync(join(SET, file)));
-    assert.deepEqual([png.width, png.height], [48, 40], file);
+    assert.deepEqual([png.width, png.height], file === "ovejita_24x18.png" ? [24, 18] : [48, 40], file);
     for (let i = 3; i < png.data.length; i += 4) {
       assert.ok(png.data[i] === 0 || png.data[i] === 255, `binary alpha: ${file}`);
     }
