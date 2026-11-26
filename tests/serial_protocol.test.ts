@@ -44,6 +44,33 @@ test("an image frame matches the documented layout byte for byte", () => {
   assert.equal(frame.readUInt32LE(frame.length - 4), crc32(frame.subarray(0, frame.length - 4)), "CRC-32 over magic..payload");
 });
 
+test("clock activation carries only session identity and four little-endian UTC bytes", () => {
+  for (const utcSeconds of [1577836800, 2147483647]) {
+    const frame = buildSerialFrame({ op: "clock", requestId: 0x1234, sessionId: session, utcSeconds });
+    assert.equal(frame.subarray(0, 8).toString("hex"), "454d545301040100");
+    assert.equal(frame.readUInt16LE(8), 0x1234);
+    assert.equal(frame.readUInt16LE(10), session.length);
+    assert.equal(frame.readUInt16LE(12), 0);
+    assert.equal(frame.readUInt32LE(14), 4);
+    assert.equal(frame.subarray(18, 18 + session.length).toString("latin1"), session);
+    assert.equal(frame.readUInt32LE(18 + session.length), utcSeconds);
+    assert.equal(frame.length, 18 + session.length + 4 + 4);
+    assert.equal(frame.readUInt32LE(frame.length - 4), crc32(frame.subarray(0, -4)));
+  }
+});
+
+test("clock activation rejects invalid time, identity, name and flags", () => {
+  const clock = { op: "clock", requestId: 7, sessionId: session, utcSeconds: 1700000000 } as const;
+  for (const utcSeconds of [undefined, 1577836799, 2147483648, 1700000000.5, NaN]) {
+    assert.throws(() => buildSerialFrame({ ...clock, utcSeconds }), /serial time/);
+  }
+  assert.throws(() => buildSerialFrame({ ...clock, sessionId: undefined }), /session/);
+  assert.throws(() => buildSerialFrame({ ...clock, sessionId: "bad session" }), /session/);
+  assert.throws(() => buildSerialFrame({ ...clock, name: "panel" }), /name/);
+  assert.throws(() => buildSerialFrame({ ...clock, clockState: true }), /flags/);
+  assert.throws(() => buildSerialFrame({ ...clock, payload: image }), /length/);
+});
+
 test("control frames carry no payload and require session identity", () => {
   for (const [op, code] of [["claim", 1], ["heartbeat", 2], ["release", 3]] as const) {
     const frame = buildSerialFrame({ op, requestId: 7, sessionId: session });
@@ -101,7 +128,7 @@ test("replies are found by scanning, because console lines interleave", () => {
 });
 
 test("result codes map to the documented names", () => {
-  const names = ["ok", "crc", "version", "op", "flags", "reserved", "length", "oversize", "session", "name", "png", "busy"];
+  const names = ["ok", "crc", "version", "op", "flags", "reserved", "length", "oversize", "session", "name", "png", "busy", "time"];
   names.forEach((name, code) => assert.equal(serialResultName(code), name));
   assert.equal(serialResultName(99), "unknown");
 });

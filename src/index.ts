@@ -25,7 +25,7 @@ import { readYoloRest } from "./yolo.ts";
 import { ExternalDisplay, ExternalDisplays, type IdleClockStatus, type SelectedImage, type FrameSink } from "./external_display.ts";
 import { buildPanelModel, cycleClockMode, framePanelLines, nextAppearanceValue, type PanelAppearanceKey, type PanelClockRow, type PanelItem, type PanelSnapshot } from "./panel.ts";
 import { writePanelConfig } from "./config_write.ts";
-import { createSerialDisplay, serialSystemDeps, type SerialDisplay, type SerialPortInfo } from "./serial_display.ts";
+import { createSerialDisplay, serialSystemDeps, type SerialDisplay, type SerialImage, type SerialPortInfo } from "./serial_display.ts";
 import { parseSerialPortPath } from "./serial_protocol.ts";
 import { parseDisplayAddress, persistGlobalDisplayTarget, withDisplayTarget } from "./display_address.ts";
 import { prepareDisplayImage } from "./display_image.ts";
@@ -220,10 +220,10 @@ export default function (pi: ExtensionAPI) {
   /** USB serial output: one display at most, port session-local. */
   let usbDisplay: SerialDisplay | null = null;
   let usbPort: string | null = null;
-  let usbPending: { base64: string; state: string } | null = null;
+  let usbPending: SerialImage | { clockPeriod: symbol } | null = null;
   /** Last image the renderer selected, so a late usb start can push it at once. */
   let lastFrameImage: SelectedImage | null = null;
-  let usbBusy = false;
+  let usbBusy: SerialDisplay | null = null;
   /** Where to report a rejected serial frame, and the last error already shown. */
   let usbCtx: any = null;
   let usbWarned: string | null = null;
@@ -234,6 +234,7 @@ export default function (pi: ExtensionAPI) {
   let usbClockMode: "off" | "receiver" | "silence" = "off";
   let usbClockTimer: ReturnType<typeof setInterval> | null = null;
   let usbClockAmbient = false;
+  let usbClockPeriod: symbol | null = null;
   /** Port of the live D200 sender, so a repeated command can tell which one it holds. */
   let d200LivePort: number | null = null;
   let contextPercent: number | null = null;
@@ -612,13 +613,13 @@ export default function (pi: ExtensionAPI) {
     usbIdleClock = null;
     usbClockMode = "off";
     usbClockAmbient = false;
+    usbClockPeriod = null;
   }
 
   /**
-   * Applies the ambient transition of the USB idle clock. At the strict >300000 ms
-   * deadline the receiver mode queues exactly one clock-tagged carrier composed
-   * from the current avatar and title, and silence drops pending traffic plus the
-   * link's own heartbeats. Real activity ends the ambient period immediately; the
+   * At the strict >300000 ms deadline, receiver mode queues one handoff and
+   * silence drops pending traffic plus the link's own heartbeats.
+   * Real activity ends the ambient period immediately; the
    * ordinary latest frame (receiver) or the heartbeats (silence) resume. `resume`
    * pushes the latest ordinary frame on transitions not driven by a fresh selection.
    */
@@ -627,8 +628,16 @@ export default function (pi: ExtensionAPI) {
     const ambient = usbIdleClock.isActive(performance.now());
     if (ambient === usbClockAmbient) return;
     usbClockAmbient = ambient;
+    usbClockPeriod = null;
+    if (usbPending && "clockPeriod" in usbPending) usbPending = null;
     if (ambient && usbClockMode === "receiver") {
-      queueUsbClockCarrier();
+      if (usbDisplay.supportsClockUtc) {
+        usbClockPeriod = Symbol();
+        usbPending = { clockPeriod: usbClockPeriod };
+        pumpUsb();
+      } else {
+        queueUsbClockCarrier();
+      }
     } else if (ambient) {
       usbPending = null;
       usbDisplay.setQuiet(true);
@@ -640,10 +649,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * The one clock-tagged carrier of a receiver ambient period: the current avatar
-   * and its live validated title composed once at the deadline, sent with the
-   * protocol's existing clock flag (state "clock"). Any stale pending ordinary
-   * frame is replaced: after the carrier only the clock or a later real frame travels.
+   * Legacy handoff (or definite activation rejection): send the current avatar
+   * and title with the existing clock flag, replacing any pending ordinary frame.
    */
   function queueUsbClockCarrier(): void {
     if (!usbDisplay || !lastFrameImage) return;
@@ -654,7 +661,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Shared LED composition for the USB link; null (with a once-per-cause warning) when it fails. */
-  function composeUsbImage(image: SelectedImage): { base64: string; state: string } | null {
+  function composeUsbImage(image: SelectedImage): SerialImage | null {
     try {
       // LED layout parity with the HTTP composition: the group outline (white by
       // default, like every non-loopback LED destination), the effective validated
@@ -691,7 +698,7 @@ export default function (pi: ExtensionAPI) {
    * the PNG envelope just like the HTTP path, and the raw sprite is 48x40, so the
    * composed bytes are what travels; a composition failure never blocks the
    * other outputs. While the ambient clock owns the panel, ordinary frames are
-   * suppressed: receiver mode already sent its one carrier and silence drops
+   * suppressed: receiver mode queued its one handoff and silence drops
    * traffic entirely. Selections still update the idle clock, so a non-idle
    * state ends the ambient period and resumes ordinary delivery immediately.
    */
@@ -710,11 +717,31 @@ export default function (pi: ExtensionAPI) {
 
   /** Bounded latest-frame delivery: one send in flight, intermediate frames dropped. */
   function pumpUsb(): void {
-    if (!usbDisplay || usbBusy || !usbPending) return;
-    const image = usbPending;
+    const link = usbDisplay;
+    if (!link || usbBusy === link || !usbPending) return;
+    const pending = usbPending;
     usbPending = null;
-    usbBusy = true;
-    void usbDisplay.sendImage(image).then(result => {
+    usbBusy = link;
+    const finish = () => {
+      if (usbBusy !== link) return;
+      usbBusy = null;
+      pumpUsb();
+    };
+
+    if ("clockPeriod" in pending) {
+      const isCurrent = () => usbDisplay === link && usbClockPeriod === pending.clockPeriod;
+      void link.sendClock(isCurrent).then(result => {
+        if (!result.ok && result.result !== undefined && isCurrent()) queueUsbClockCarrier();
+      }).catch(() => {
+        // A transport failure, like a timeout, may have left the clock active.
+        // Never replace it with a PNG without a definitive negative reply.
+      }).finally(finish);
+      return;
+    }
+
+    const image = pending;
+    void link.sendImage(image).then(result => {
+      if (usbDisplay !== link) return;
       // A rejected frame used to be silent, which made a wrong payload look like a
       // working link. The firmware's own result code is reported once per change.
       if (result.ok) {
@@ -729,16 +756,14 @@ export default function (pi: ExtensionAPI) {
       usbWarned = result.error;
       usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] usb frame rejected: ${result.error}`, "warning");
     }).catch(error => {
+      if (usbDisplay !== link) return;
       // A failed write used to be an unhandled rejection: the frame was lost
       // without a trace. The cause is reported once per change, like a NACK.
       const message = `usb frame send failed: ${error instanceof Error ? error.message : String(error)}`;
       if (usbWarned === message) return;
       usbWarned = message;
       usbCtx?.ui?.notify?.(`[${EXTENSION_NAME}] ${message}`, "warning");
-    }).finally(() => {
-      usbBusy = false;
-      pumpUsb();
-    });
+    }).finally(finish);
   }
 
   /**

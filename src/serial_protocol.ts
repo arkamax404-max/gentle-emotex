@@ -10,6 +10,7 @@ import { crc32 } from "node:zlib";
 
 export const SERIAL_ENTER = "EMOTE\n";
 export const SERIAL_ENTER_ACK = "EMOTE_READY\n";
+export const SERIAL_CLOCK_CAPABILITY = "EMOTE_CLOCK_UTC1";
 export const SERIAL_EXIT = "EMTE\n";
 export const SERIAL_EXIT_ACK = "EMOTE_EXIT\n";
 export const SERIAL_MAGIC = "EMTS";
@@ -27,10 +28,10 @@ export const SERIAL_HEADER_BYTES = 18;
 export const SERIAL_CRC_BYTES = 4;
 export const SERIAL_REPLY_BYTES = 12;
 
-const OP_CODES = { image: 0, claim: 1, heartbeat: 2, release: 3 } as const;
+const OP_CODES = { image: 0, claim: 1, heartbeat: 2, release: 3, clock: 4 } as const;
 export type SerialOp = keyof typeof OP_CODES;
 
-const RESULTS = ["ok", "crc", "version", "op", "flags", "reserved", "length", "oversize", "session", "name", "png", "busy"] as const;
+const RESULTS = ["ok", "crc", "version", "op", "flags", "reserved", "length", "oversize", "session", "name", "png", "busy", "time"] as const;
 
 /** The firmware's result code as the documented name, or `unknown`. */
 export function serialResultName(code: number): string {
@@ -51,6 +52,8 @@ export interface SerialFrameRequest {
   clockState?: boolean;
   /** Raw PNG bytes; images only. */
   payload?: Buffer;
+  /** Host UTC epoch seconds; clock activation only. */
+  utcSeconds?: number;
 }
 
 /**
@@ -62,7 +65,7 @@ export function buildSerialFrame(request: SerialFrameRequest): Buffer {
   const opCode = OP_CODES[request.op];
   if (opCode === undefined) throw new Error(`invalid serial op: ${String(request.op)}`);
 
-  const { requestId, sessionId, name, clockState } = request;
+  const { requestId, sessionId, name, clockState, utcSeconds } = request;
   if (!Number.isInteger(requestId) || requestId < 0 || requestId > MAX_REQUEST_ID) {
     throw new Error(`invalid serial requestId: ${String(requestId)}`);
   }
@@ -94,6 +97,13 @@ export function buildSerialFrame(request: SerialFrameRequest): Buffer {
     payload = request.payload ?? null;
     if (!payload || payload.length === 0) throw new Error("invalid serial length: an image needs a payload");
     if (payload.length > MAX_PNG_BYTES) throw new Error(`invalid serial oversize: ${payload.length} bytes above 32768`);
+  } else if (request.op === "clock") {
+    if (clockState === true) throw new Error("invalid serial flags: clock activation requires only the session flag");
+    if (utcSeconds === undefined || !Number.isInteger(utcSeconds) || utcSeconds < 1577836800 || utcSeconds > 2147483647) {
+      throw new Error("invalid serial time: UTC seconds outside 1577836800..2147483647");
+    }
+    payload = Buffer.alloc(4);
+    payload.writeUInt32LE(utcSeconds);
   }
 
   const flags = (sessionId === undefined ? 0 : 1) | (nameBytes === null ? 0 : 2) | (clockState === true ? 4 : 0);

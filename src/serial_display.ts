@@ -1,5 +1,7 @@
 import {
   SERIAL_BAUD_RATE,
+  SERIAL_CLOCK_CAPABILITY,
+  SERIAL_ENTER,
   SERIAL_ENTER_ACK,
   SERIAL_EXIT,
   SERIAL_EXIT_ACK,
@@ -64,7 +66,10 @@ export const SERIAL_HEARTBEAT_MS = 5_000;
 export interface SerialDisplay {
   start(path?: string): Promise<SerialStartResult>;
   sendImage(image: SerialImage): Promise<SerialSendResult>;
-  sendControl(op: Exclude<SerialOp, "image">): Promise<SerialSendResult>;
+  sendControl(op: Exclude<SerialOp, "image" | "clock">): Promise<SerialSendResult>;
+  /** One attempt only; ownership is checked when the command reaches the wire. */
+  sendClock(isCurrent: () => boolean): Promise<SerialSendResult>;
+  readonly supportsClockUtc: boolean;
   stop(): Promise<void>;
   /** Suppresses the link's own heartbeat frames while true; images and controls still send. */
   setQuiet(quiet: boolean): void;
@@ -85,11 +90,14 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
   let chain: Promise<unknown> = Promise.resolve();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let stopping = false;
+  let awaitingHandshake = false;
+  let supportsClockUtc = false;
   /** Silence-mode support: no heartbeat frames leave the link while true. */
   let quiet = false;
 
   const onData = (chunk: Buffer): void => {
     buffer = Buffer.concat([buffer, chunk]);
+    if (awaitingHandshake) return;
     const parsed = parseSerialReplies(buffer);
     buffer = parsed.rest;
     for (const reply of parsed.replies) {
@@ -137,12 +145,12 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
     });
   }
 
-  async function transmit(build: (id: number) => Buffer): Promise<SerialSendResult> {
+  async function transmit(build: (id: number) => Buffer, retries = resendAttempts): Promise<SerialSendResult> {
     if (!port) return { ok: false, error: "serial port is not open" };
     const id = (requestId = (requestId + 1) & 0xffff);
     const frame = build(id);
     let sawNack: number | null = null;
-    for (let attempt = 0; attempt <= resendAttempts; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
       const outcome = await exchange(frame, id);
       if ("ok" in outcome) return { ok: true, result: "ok" };
       if ("result" in outcome) sawNack = outcome.result;
@@ -159,13 +167,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
     return next;
   }
 
-  /**
-   * Consumes one acknowledgement line. The firmware answers with Arduino's
-   * `println`, which ends in CRLF, while the transport document writes `
-`: the
-   * token is matched without its ending and the rest of the line is consumed when
-   * present, so both endings (and console noise after them) are accepted.
-   */
+  /** Consumes the legacy exit acknowledgement, tolerating console noise. */
   function consumeAckLine(token: string): boolean {
     const at = buffer.indexOf(token, 0, "latin1");
     if (at < 0) return false;
@@ -176,8 +178,19 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
 
   async function waitForHandshake(): Promise<boolean> {
     const deadline = Date.now() + replyTimeoutMs;
+    const ready = SERIAL_ENTER_ACK.slice(0, -1);
+    let previousWasCapability = false;
     while (Date.now() < deadline) {
-      if (consumeAckLine(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), ""))) return true;
+      for (let newline = buffer.indexOf(10); newline !== -1; newline = buffer.indexOf(10)) {
+        const end = buffer[newline - 1] === 13 ? newline - 1 : newline;
+        const line = buffer.toString("latin1", 0, end);
+        buffer = buffer.subarray(newline + 1);
+        if (line === ready) {
+          supportsClockUtc = previousWasCapability;
+          return true;
+        }
+        previousWasCapability = line === SERIAL_CLOCK_CAPABILITY;
+      }
       await new Promise(resolve => setTimeout(resolve, 2));
     }
     return false;
@@ -185,6 +198,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
 
   return {
     get path() { return openPath; },
+    get supportsClockUtc() { return supportsClockUtc; },
 
     async start(path?: string): Promise<SerialStartResult> {
       if (port) return openPath ? { ok: true, path: openPath } : { ok: false, error: "serial port is not open" };
@@ -206,10 +220,12 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
         return { ok: false, error: `cannot open ${target}` };
       }
       openPath = target;
-      port.on("data", onData);
+      stopping = false;
+      awaitingHandshake = true;
       buffer = Buffer.alloc(0);
+      port.on("data", onData);
       try {
-        await write(Buffer.from("EMOTE\n", "latin1"));
+        await write(Buffer.from(SERIAL_ENTER, "latin1"));
       } catch {
         await closeQuietly();
         return { ok: false, error: `cannot open ${target}` };
@@ -218,6 +234,7 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
         await closeQuietly();
         return { ok: false, error: `${target} did not answer the serial handshake` };
       }
+      awaitingHandshake = false;
       heartbeat = setInterval(() => {
         if (!port || waiter || stopping || quiet) return;
         void enqueue(() => transmit(id => buildSerialFrame({ op: "heartbeat", requestId: id, sessionId: deps.sessionId! })));
@@ -237,8 +254,21 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
       })));
     },
 
-    sendControl(op: Exclude<SerialOp, "image">): Promise<SerialSendResult> {
+    sendControl(op: Exclude<SerialOp, "image" | "clock">): Promise<SerialSendResult> {
       return enqueue(() => transmit(id => buildSerialFrame({ op, requestId: id, sessionId: deps.sessionId ?? undefined })));
+    },
+
+    sendClock(isCurrent: () => boolean): Promise<SerialSendResult> {
+      const target = port;
+      return enqueue(async () => {
+        if (!target || port !== target || stopping || !supportsClockUtc || !isCurrent()) {
+          return { ok: false, error: "clock activation is no longer available" };
+        }
+        return transmit(id => buildSerialFrame({
+          op: "clock", requestId: id, sessionId: deps.sessionId ?? undefined,
+          utcSeconds: Math.floor(Date.now() / 1_000),
+        }), 0);
+      });
     },
 
     setQuiet(value: boolean): void { quiet = value; },
@@ -267,6 +297,8 @@ export function createSerialDisplay(deps: SerialDisplayDeps): SerialDisplay {
     const current = port;
     port = null;
     openPath = null;
+    awaitingHandshake = false;
+    supportsClockUtc = false;
     waiter = null;
     buffer = Buffer.alloc(0);
     if (!current) return;

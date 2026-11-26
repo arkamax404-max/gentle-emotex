@@ -1706,7 +1706,13 @@ function serialReply(requestId: number, result: number): Buffer {
 }
 
 /** A fake CDC peer speaking protocol v1, mirroring the serial_display unit fake. */
-function fakeCdcPort(options: { answers?: Array<number | "silent">; failWrite?: (data: Buffer) => boolean } = {}) {
+function fakeCdcPort(options: {
+  answers?: Array<number | "silent">;
+  failWrite?: (data: Buffer) => boolean;
+  handshakeChunks?: string[];
+  holdExit?: boolean;
+  response?: (frame: Buffer) => number | "silent";
+} = {}) {
   const listeners: Array<(chunk: Buffer) => void> = [];
   const written: Buffer[] = [];
   const answers = [...(options.answers ?? [])];
@@ -1721,13 +1727,15 @@ function fakeCdcPort(options: { answers?: Array<number | "silent">; failWrite?: 
       const failed = options.failWrite?.(copy) ?? false;
       const text = copy.toString("latin1");
       if (text === SERIAL_ENTER) {
-        queueMicrotask(() => emit(Buffer.from(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), String.fromCharCode(10)))));
+        for (const chunk of options.handshakeChunks ?? [SERIAL_ENTER_ACK]) {
+          queueMicrotask(() => emit(Buffer.from(chunk)));
+        }
       } else if (text === SERIAL_EXIT) {
-        queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK.replace(String.fromCharCode(10), String.fromCharCode(10)))));
+        if (!options.holdExit) queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK)));
       } else if (copy.subarray(0, 4).toString("latin1") === "EMTS") {
         frames.push(copy);
         const id = copy.readUInt16LE(8);
-        const answer = answers.length > 0 ? answers.shift()! : 0;
+        const answer = options.response?.(copy) ?? (answers.length > 0 ? answers.shift()! : 0);
         // A write that failed at the port never reached the device, so it is
         // not answered: the sender observes the rejection, not a reply.
         if (!failed && answer !== "silent") queueMicrotask(() => emit(serialReply(id, answer as number)));
@@ -1738,7 +1746,11 @@ function fakeCdcPort(options: { answers?: Array<number | "silent">; failWrite?: 
     on(_event: string, handler: (chunk: Buffer) => void) { listeners.push(handler); },
     off() {},
   };
-  return { port, written, frames, answers };
+  return {
+    port, written, frames, answers,
+    answer: (frame: Buffer, result: number) => emit(serialReply(frame.readUInt16LE(8), result)),
+    exit: () => emit(Buffer.from(SERIAL_EXIT_ACK)),
+  };
 }
 
 /** Lets queued microtask replies and promise chains settle. */
@@ -2271,7 +2283,7 @@ function expectedUsbClockCarrier(title: string | null, outline: string): Buffer 
 }
 
 /** Boots a project with idle and think sprite frames, a fake CDC peer and an optional group clock mode. */
-async function bootUsbClockLab(root: string, idleClock?: "off" | "receiver" | "silence") {
+async function bootUsbClockLab(root: string, idleClock?: "off" | "receiver" | "silence", peer = fakeCdcPort()) {
   const dir = join(root, ".pi", "extensions", "gentle-emote");
   mkdirSync(join(dir, "emotes", "ledsprite", "idle"), { recursive: true });
   mkdirSync(join(dir, "emotes", "ledsprite", "think"), { recursive: true });
@@ -2282,7 +2294,6 @@ async function bootUsbClockLab(root: string, idleClock?: "off" | "receiver" | "s
     emotes: [{ model: "*", "emote-set": "ledsprite" }],
     ...(idleClock === undefined ? {} : { externalDisplay: { idleClock } }),
   }));
-  const peer = fakeCdcPort();
   const lab = await boot(root, [], join(root, "profile"));
   useSerialSystemDeps({ list: async () => [{ path: "COM5" }], open: async () => peer.port });
   return { lab, peer, emote: lab.commands.get("emote") };
@@ -2335,6 +2346,7 @@ test("usbOn defaults to the receiver clock handoff: one carrier past five idle m
     await booted.emote.handler("idle", lab.ctx);
     await drain();
     assert.equal(clockFrames().length, 1, "the carrier is never repeated");
+    assert.ok(booted.peer.frames.every(frame => frame[5] !== 4), "old firmware never gets an activation attempt");
     assert.equal(ordinaryFrames().length, afterTitle, "ordinary frames stay suppressed while ambient");
 
     // Real activity ends the ambient period immediately with an ordinary frame.
@@ -2352,13 +2364,165 @@ test("usbOn defaults to the receiver clock handoff: one carrier past five idle m
   }
 });
 
+const UTC_HANDSHAKE = ["console\r\nEMOTE_CLO", "CK_UTC1\r", "\nEMOTE_RE", "ADY\r\n"];
+const idleWireFrames = (peer: ReturnType<typeof fakeCdcPort>) => peer.frames.filter(frame => frame[5] === 0 || frame[5] === 4);
+const idleWireKinds = (peer: ReturnType<typeof fakeCdcPort>) => idleWireFrames(peer).map(frame =>
+  frame[5] === 4 ? "activation" : (frame[6] & 4) !== 0 ? "carrier" : "image");
+
+test("capable USB receiver samples UTC at dispatch and replaces pending ordinary images at the idle edge", async t => {
+  const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-utc-"));
+  let lab: Awaited<ReturnType<typeof boot>> | undefined;
+  try {
+    let elapsed = 1_000;
+    let utc = 1700000000123;
+    t.mock.method(performance, "now", () => elapsed);
+    const peer = fakeCdcPort({ handshakeChunks: UTC_HANDSHAKE, response: frame => frame[5] === 0 ? "silent" : 0 });
+    const booted = await bootUsbClockLab(root, undefined, peer);
+    lab = booted.lab;
+    await booted.emote.handler("usbOn", lab.ctx);
+    t.mock.method(Date, "now", () => utc);
+    await drain();
+    await booted.emote.handler("title USB Clock", lab.ctx);
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image"], "latest image is pending behind the in-flight image");
+
+    elapsed += 300_000;
+    await lab.emit("agent_end");
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image"], "nothing overtakes the in-flight image at the deadline");
+    elapsed++;
+    await lab.emit("agent_end");
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image"], "activation also waits for the in-flight image");
+
+    utc = 1700000019987;
+    peer.answer(idleWireFrames(peer)[0]!, 0);
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image", "activation"]);
+    const activation = idleWireFrames(peer)[1]!;
+    assert.equal(activation.readUInt32LE(18 + activation.readUInt16LE(10)), 1700000019);
+    elapsed += 1_000;
+    await lab.emit("agent_end");
+    await booted.emote.handler("idle", lab.ctx);
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image", "activation"], "ACK does not queue a carrier or replay activation");
+    await booted.emote.handler("think", lab.ctx);
+    await drain();
+    assert.deepEqual(idleWireKinds(peer), ["image", "activation", "image"]);
+    peer.answer(idleWireFrames(peer)[2]!, 0);
+  } finally {
+    await lab?.shutdown();
+    lab?.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const verdict of ["NACK", "timeout", "write error", "resumed activity", "re-entered idle", "replacement link"] as const) {
+  test(`capable USB receiver clock: ${verdict}`, async t => {
+    const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-verdict-"));
+    let lab: Awaited<ReturnType<typeof boot>> | undefined;
+    try {
+      let elapsed = 1_000;
+      t.mock.method(performance, "now", () => elapsed);
+      const peer = fakeCdcPort({
+        handshakeChunks: UTC_HANDSHAKE,
+        holdExit: verdict === "replacement link",
+        response: frame => frame[5] === 4 ? "silent" : 0,
+        failWrite: frame => verdict === "write error" && frame[5] === 4,
+      });
+      const booted = await bootUsbClockLab(root, undefined, peer);
+      lab = booted.lab;
+      const run = (args: string) => booted.emote.handler(args, lab!.ctx);
+      const enterAmbient = async () => {
+        elapsed += 300_001;
+        await lab!.emit("agent_end");
+        await drain();
+      };
+      await run("usbOn");
+      await run("title USB Clock");
+      await drain();
+      if (verdict === "timeout") t.mock.timers.enable({ apis: ["setTimeout"] });
+      const before = idleWireKinds(peer).length;
+      assert.ok(before > 0);
+      const traffic = () => idleWireKinds(peer).slice(before);
+      await enterAmbient();
+      assert.deepEqual(traffic(), ["activation"], "the idle edge sends op 4 instead of a PNG");
+      const activation = idleWireFrames(peer)[before]!;
+      switch (verdict) {
+        case "NACK":
+          peer.answer(activation, 12);
+          await drain();
+          assert.deepEqual(traffic(), ["activation", "carrier"]);
+          assert.deepEqual(usbImagePayload(idleWireFrames(peer)[before + 1]!), expectedUsbClockCarrier("USB Clock", "#ffffff"));
+          break;
+        case "timeout":
+          t.mock.timers.tick(2_000);
+          await drain();
+          // A following ordinary image proves the exchange really timed out.
+          assert.deepEqual(traffic(), ["activation"]);
+          await run("think");
+          await drain();
+          assert.deepEqual(traffic(), ["activation", "image"]);
+          t.mock.timers.reset();
+          break;
+        case "write error":
+          assert.deepEqual(traffic(), ["activation"]);
+          await run("think");
+          await drain();
+          assert.deepEqual(traffic(), ["activation", "image"]);
+          break;
+        case "resumed activity":
+          await run("think");
+          peer.answer(activation, 12);
+          await drain();
+          assert.deepEqual(traffic(), ["activation", "image"]);
+          break;
+        case "re-entered idle":
+          await run("think");
+          await run("idle");
+          await enterAmbient();
+          peer.answer(activation, 12);
+          await drain();
+          assert.deepEqual(traffic(), ["activation", "activation"], "only the new idle period owns the pending slot");
+          peer.answer(idleWireFrames(peer).at(-1)!, 0);
+          break;
+        case "replacement link": {
+          const replacement = fakeCdcPort({ handshakeChunks: UTC_HANDSHAKE });
+          useSerialSystemDeps({ list: async () => [{ path: "COM6" }], open: async () => replacement.port });
+          await run("usbOff");
+          await run("usbOn COM6");
+          await drain();
+          const freshImages = idleWireKinds(replacement);
+          assert.ok(freshImages.length > 0 && freshImages.every(kind => kind === "image"));
+          await enterAmbient();
+          peer.answer(activation, 12);
+          peer.exit();
+          await drain();
+          assert.deepEqual(traffic(), ["activation"]);
+          assert.deepEqual(idleWireKinds(replacement), [...freshImages, "activation"]);
+          break;
+        }
+      }
+      if (verdict === "NACK") {
+        await lab.emit("agent_end");
+        await drain();
+        assert.deepEqual(traffic(), ["activation", "carrier"], "fallback does not restart activation");
+      }
+    } finally {
+      await lab?.shutdown();
+      lab?.restore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("an explicit externalDisplay.idleClock off keeps ordinary USB delivery past the deadline", async t => {
   const root = mkdtempSync(join(tmpdir(), "emote-usb-clock-off-"));
   let lab: Awaited<ReturnType<typeof boot>> | undefined;
   try {
     let elapsed = 1_000;
     t.mock.method(performance, "now", () => elapsed);
-    const booted = await bootUsbClockLab(root, "off");
+    const booted = await bootUsbClockLab(root, "off", fakeCdcPort({ handshakeChunks: UTC_HANDSHAKE }));
     lab = booted.lab;
     const imageFrames = () => booted.peer.frames.filter(frame => frame[5] === 0);
     const clockFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 4);
@@ -2376,6 +2540,7 @@ test("an explicit externalDisplay.idleClock off keeps ordinary USB delivery past
     await drain();
     assert.equal(clockFrames().length, 0, "an explicit off never hands the panel to the clock");
     assert.ok(ordinaryFrames().length > started, "ordinary delivery continues past the deadline");
+    assert.ok(booted.peer.frames.every(frame => frame[5] !== 4));
   } finally {
     await lab?.shutdown();
     lab?.restore();
@@ -2389,7 +2554,7 @@ test("an explicit externalDisplay.idleClock silence stops USB image traffic whil
   try {
     let elapsed = 1_000;
     t.mock.method(performance, "now", () => elapsed);
-    const booted = await bootUsbClockLab(root, "silence");
+    const booted = await bootUsbClockLab(root, "silence", fakeCdcPort({ handshakeChunks: UTC_HANDSHAKE }));
     lab = booted.lab;
     const imageFrames = () => booted.peer.frames.filter(frame => frame[5] === 0);
     const clockFrames = () => imageFrames().filter(frame => (frame[6] & 4) === 4);
@@ -2411,6 +2576,7 @@ test("an explicit externalDisplay.idleClock silence stops USB image traffic whil
     await booted.emote.handler("think", lab.ctx);
     await drain();
     assert.ok(ordinaryFrames().length > started, "ordinary delivery resumes immediately on activity");
+    assert.ok(booted.peer.frames.every(frame => frame[5] !== 4));
   } finally {
     await lab?.shutdown();
     lab?.restore();

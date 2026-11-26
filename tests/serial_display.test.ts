@@ -19,7 +19,7 @@ function reply(requestId: number, result: number): Buffer {
 }
 
 /** A fake CDC peer that speaks protocol v1 and records what the sender wrote. */
-function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent">; lineEnd?: string } = {}) {
+function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent">; lineEnd?: string; handshakeChunks?: string[] } = {}) {
   const listeners: Array<(chunk: Buffer) => void> = [];
   const written: Buffer[] = [];
   const answers = [...(options.answers ?? [])];
@@ -31,7 +31,10 @@ function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent
       const text = data.toString("latin1");
       if (text === SERIAL_ENTER) {
         handshake = true;
-        if (options.autoAck !== false) queueMicrotask(() => emit(Buffer.from(SERIAL_ENTER_ACK.replace(String.fromCharCode(10), options.lineEnd ?? String.fromCharCode(10)))));
+        if (options.autoAck !== false) {
+          const chunks = options.handshakeChunks ?? [SERIAL_ENTER_ACK.replace("\n", options.lineEnd ?? "\n")];
+          for (const chunk of chunks) queueMicrotask(() => emit(Buffer.from(chunk)));
+        }
       } else if (text === SERIAL_EXIT) {
         queueMicrotask(() => emit(Buffer.from(SERIAL_EXIT_ACK.replace(String.fromCharCode(10), options.lineEnd ?? String.fromCharCode(10)))));
       } else if (data.subarray(0, 4).toString("latin1") === "EMTS") {
@@ -49,7 +52,10 @@ function fakePort(options: { autoAck?: boolean; answers?: Array<number | "silent
     on(_event: string, handler: (chunk: Buffer) => void) {
       listeners.push(handler);
     },
-    off() {},
+    off(_event, handler) {
+      const index = listeners.indexOf(handler);
+      if (index >= 0) listeners.splice(index, 1);
+    },
   };
   return { port, written, frames, isHandshaken: () => handshake };
   function emit(chunk: Buffer) {
@@ -188,6 +194,48 @@ test("stop-and-wait: never two frames in flight", async () => {
     clearTimeout(deadline);
   }
   await link.stop();
+});
+
+test("clock capability requires an exact line before ready, including fragmented CRLF", async () => {
+  for (const [handshakeChunks, capable] of [
+    [["console\r\nEMOTE_C", "LOCK_UTC1\r", "\nEMOTE_RE", "ADY\r", "\n"], true],
+    [["EMOTE_CLOCK_UTC1\nEMOTE_READY\n"], true],
+    [["console EMOTE_CLOCK_UTC1\nEMOTE_READY\n"], false],
+    [["EMOTE_CLOCK_UTC10\nEMOTE_READY\n"], false],
+    [["EMOTE_READY\nEMOTE_CLOCK_UTC1\n"], false],
+    [["EMOTE_READY\n"], false],
+  ] satisfies Array<[string[], boolean]>) {
+    const peer = fakePort({ handshakeChunks });
+    const link = transport(peer.port);
+    try {
+      assert.equal((await link.start()).ok, true);
+      assert.equal(link.supportsClockUtc, capable, JSON.stringify(handshakeChunks));
+      if (!capable) {
+        assert.equal((await link.sendClock(() => true)).ok, false);
+        assert.deepEqual(peer.frames, [], "legacy peers never get op 4");
+      }
+    } finally { await link.stop(); }
+    assert.equal(link.supportsClockUtc, false, "capability is scoped to the open connection");
+  }
+});
+
+test("clock activation does not retry on a NACK or an ambiguous timeout", async () => {
+  for (const [answer, expected] of [
+    [12, { ok: false, result: "12", error: "rejected by the display: result 12" }],
+    ["silent", { ok: false, error: "timeout: the display did not answer" }],
+  ] as const) {
+    const peer = fakePort({ handshakeChunks: ["EMOTE_CLOCK_UTC1\nEMOTE_READY\n"], answers: [answer] });
+    const link = transport(peer.port);
+    const keepAlive = setTimeout(() => {}, 1_000);
+    try {
+      await link.start();
+      assert.deepEqual(await link.sendClock(() => true), expected);
+      assert.deepEqual(peer.frames.map(frame => frame[5]), [4]);
+    } finally {
+      clearTimeout(keepAlive);
+      await link.stop();
+    }
+  }
 });
 
 test("setQuiet suppresses only the link's own heartbeats", async () => {
